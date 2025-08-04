@@ -33,11 +33,11 @@ def main(args):
 
     height, width = image.size
 
-    if height > 512 or width > 512:
-        new_height = min(height, 512)
-        width = new_height * width // height
-        height = new_height
-        image = image.resize((width, height), Image.LANCZOS)
+    # if height > 512 or width > 512:
+    #     new_height = min(height, 512)
+    #     width = new_height * width // height
+    #     height = new_height
+    #     image = image.resize((width, height))
 
     # output = pipe(image=image, prompt=prompt).frames[0]
     output = pipe(image=image).frames[0]

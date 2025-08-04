@@ -11,26 +11,28 @@ import argparse
 from PIL import Image
 
 
-pipe = DiffusionPipeline.from_pretrained("stabilityai/stable-video-diffusion-img2vid-xt-1-1", torch_dtype=torch.float16)
+pipe = DiffusionPipeline.from_pretrained("stabilityai/stable-video-diffusion-img2vid-xt", torch_dtype=torch.float16)
 pipe.to("cuda")
 
-# prompt = "A man with short gray hair plays a red electric guitar."
-# image = load_image(
-#     "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/guitar-man.png"
-# )
+prompt = "A man with short gray hair plays a red electric guitar."
 
+web_img_path= "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/guitar-man.png"
 
 def main(args):
-    img_path = args.image_path
-    if not os.path.exists(img_path):
-        raise FileNotFoundError(f"Image path {img_path} does not exist.")
     output_dir = args.output
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    basename = os.path.basename(img_path).split('.')[0]
 
-    image = Image.open(img_path).convert("RGB")
+    img_path = args.image_path
+    if os.path.exists(img_path):
+        
 
+        basename = os.path.basename(img_path).split('.')[0]
+
+        image = Image.open(img_path).convert("RGB")
+    else:
+        image = load_image(web_img_path)
+        basename = os.path.basename(web_img_path).split('.')[0]
     height, width = image.size
 
     # if height > 512 or width > 512:
@@ -49,6 +51,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Stable Video Diffusion")
     parser.add_argument("--image_path", type=str, required=True, help="Path to input image")
     parser.add_argument("--output", type=str, default= 'output', help="Path to save output video")
+    parser.add_argument("--prompt", type=str, default=None, help="Text prompt for video generation")
     args = parser.parse_args()
 
     # Load the input image

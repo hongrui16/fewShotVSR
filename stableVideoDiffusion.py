@@ -8,6 +8,8 @@ import torch.nn as nn
 import cv2
 import argparse
 
+from PIL import Image
+
 
 pipe = DiffusionPipeline.from_pretrained("stabilityai/stable-video-diffusion-img2vid-xt-1-1", torch_dtype=torch.float16)
 pipe.to("cuda")
@@ -27,7 +29,7 @@ def main(args):
         os.makedirs(output_dir)
     basename = os.path.basename(img_path).split('.')[0]
 
-    image = cv2.imread(img_path)
+    image = Image.open(img_path).convert("RGB")
     # output = pipe(image=image, prompt=prompt).frames[0]
     output = pipe(image=image).frames[0]
     export_to_video(output, os.path.join(output_dir, f"{basename}.mp4"))

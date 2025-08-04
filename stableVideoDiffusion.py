@@ -30,6 +30,15 @@ def main(args):
     basename = os.path.basename(img_path).split('.')[0]
 
     image = Image.open(img_path).convert("RGB")
+
+    height, width = image.size
+
+    if height > 512 or width > 512:
+        new_height = min(height, 512)
+        width = new_height * width // height
+        height = new_height
+        image = image.resize((width, height), Image.LANCZOS)
+
     # output = pipe(image=image, prompt=prompt).frames[0]
     output = pipe(image=image).frames[0]
     export_to_video(output, os.path.join(output_dir, f"{basename}.mp4"))

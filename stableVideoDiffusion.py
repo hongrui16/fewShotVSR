@@ -49,7 +49,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Stable Video Diffusion")
-    parser.add_argument("--image_path", type=str, required=True, help="Path to input image")
+    parser.add_argument("--image_path", type=str, default=None, help="Path to input image")
     parser.add_argument("--output", type=str, default= 'output', help="Path to save output video")
     parser.add_argument("--prompt", type=str, default=None, help="Text prompt for video generation")
     args = parser.parse_args()

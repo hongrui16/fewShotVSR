@@ -24,8 +24,7 @@ def main(args):
         os.makedirs(output_dir)
 
     img_path = args.image_path
-    if os.path.exists(img_path):
-        
+    if not img_path is None and os.path.exists(img_path):
 
         basename = os.path.basename(img_path).split('.')[0]
 

@@ -10,5 +10,6 @@ image = load_image(
     "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/guitar-man.png"
 )
 
-output = pipe(image=image, prompt=prompt).frames[0]
+# output = pipe(image=image, prompt=prompt).frames[0]
+output = pipe(image=image).frames[0]
 export_to_video(output, "output.mp4")

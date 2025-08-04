@@ -41,7 +41,9 @@ def main(args):
 
     # output = pipe(image=image, prompt=prompt).frames[0]
     output = pipe(image=image).frames[0]
-    export_to_video(output, os.path.join(output_dir, f"{basename}.mp4"))
+    video_path = os.path.join(output_dir, f"{basename}.mp4")
+    export_to_video(output, video_path)
+    print(f"Video saved to {video_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Stable Video Diffusion")

@@ -4,7 +4,7 @@
 
 - Freezing the VAE.
 - Applying LoRA to the U-Net.
-- A custom ControlNet with positional encoding injection.
+- A custom image feature embedding with positional encoding injection.
 - CLIP-based condition map.
 - Positional encoding for HD indices.
 - A complete loss function (denoising + fidelity + perceptual + temporal).

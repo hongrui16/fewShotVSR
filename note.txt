@@ -24,3 +24,67 @@
 
 image_embeddings 构造：N=0 时完全用 LR embedding，N>0 时稀疏位用 HD embedding + mask
 
+--------------------------------------------------------------------------------------------------
+下面是你这套 \*\*“稀疏 HD 帧增强的 Few-shot Video SR（基于 SVD Temporal-UNet）”\*\*的精炼版总结——按数据流走一遍：
+
+# 目标
+
+用极少量 HD 参考帧（N∈{0,1,2}）提升整段 LR 视频（T=14）的清晰度，保持 N=0 时也能稳健。
+
+# 数据与骨干
+
+* **Backbone**：Diffusers 的 SVD 时空 UNet（`UNetSpatioTemporalConditionModel`），UNet 只做 LoRA 训练；VAE 冻结；调度器用 DPM-Solver。
+* **形状**：UNet latent 走 **(B, C, T, h, w)**；cross-attn 的 `encoder_hidden_states` 走 **(B, T, cross\_attention\_dim)**（常见 1024）。
+
+# 目标 latent 的构造（被去噪的那条分支）
+
+1. 用 VAE 将 **LR 全序列**编码成 `cond_lr_latents`。
+2. 用 VAE 将 **稀疏 HD 帧**编码成 `hr_latents`。
+3. 复制一份 `full_hr_latents = cond_lr_latents.clone()`，在稀疏索引处 **用 HD latent 替换**：
+   `full_hr_latents.scatter_(dim=2, index=indices, src=hr_latents)`。
+4. 采样噪声并加噪得到 **z\_t = add\_noise(full\_hr\_latents, ε, t)**（训练目标所对应的 noisy latent）。
+
+# 条件输入（给 UNet 的）
+
+* **Latent 条件**：把 **z\_t** 与 **cond\_lr\_latents（纯 LR 全帧）** 在通道维拼接：
+  `latent_model_input = cat([z_t, cond_lr_latents], dim=1)`。
+
+* **Cross-attention 条件 `encoder_hidden_states`**：逐帧 tokens，长度 **T**，做法：
+
+  1. **LR 全帧 CLIP 特征**作为底座 `[B, T, D]`（CLIP 冻结、逐帧 encode，注意 `permute` 后再展平）。
+  2. 在稀疏索引处，与对应时刻的 **HD CLIP 特征**做 **门控融合（软替换）**：
+     `fused = σ(g) * HD + (1-σ(g)) * LR_at_idx`（g 初值 −1 \~ −2，更偏 LR 保稳定；可逐维门控）。
+  3. 加 **可学习绝对位置**（T=14 最合适，×0.1 缩放）和 **来源类型嵌入**（LR=0 / HD=1）。
+  4. 线性 **投到 `cross_attention_dim`** 并 **LayerNorm**，对齐 UNet 预期 dtype（fp16）。
+
+  > 注意：SVD Temporal-UNet **不接收 attention mask**，稀疏/权重信息通过上面的 token 设计表达。
+
+* **Added time ids**：按 SVD 的 `_get_add_time_ids` 提供 clip-level 信息（fps-1、motion bucket、noise aug）。
+
+# 前向与损失
+
+* **UNet 前向**：输入 `latent_model_input, t, encoder_hidden_states, added_time_ids`，预测噪声。
+* **损失（只在稀疏帧对齐监督）**：
+
+  * **Denoise MSE**：在稀疏索引帧上对 `pred_noise` 与 `ε` 做 MSE；N=0 时跳过。
+  * **像素 L1 + LPIPS**：把 `pred_original` 解码到像素空间，在稀疏帧与 HD 监督。
+  * **时序一致**：RAFT 光流，一条与 **LR 全帧**，一条在 **稀疏帧 vs HD**（归一化到 \[0,1] 再算）。
+  * 总损失示例：`L = L_denoise + 0.5*L1 + 0.5*LPIPS + 0.2*Temp_LR + 0.1*Temp_HD`；N=0 时只保留与稀疏无关项。
+
+# 训练与稳健性细节
+
+* **N 随机 0/1/2**：始终有 LR 底座 → N=0 自然退化为“仅 LR 条件”不崩。
+* **门控初始化**：`g` 的 logit 取 −1（≈0.27）或 −1.5（≈0.18）/ −2（≈0.12）更稳；可给门控较小 LR。
+* **可选增强**：
+
+  * **邻域扩散**：让 HD 的 token 影响邻近 1–2 帧（衰减权）；
+  * **HD token dropout（训练期）**：增强 N=0 的鲁棒性。
+* **实现要点**：
+
+  * CLIP 编码需 `permute(0,2,1,3,4)` 后再展平，`torch.no_grad()`；
+  * VAE latent 记得乘 `vae.config.scaling_factor`；
+  * 与 UNet 的 `cross_attention_dim` 严格对齐；
+  * N=0 时所有 `gather/scatter(… indices)` 的分支要 **guard** 掉；
+  * 与 UNet dtype 对齐（fp16）。
+
+管线是——**目标 latent 用“LR 底座 + 稀疏 HD 替换”加噪得到 z\_t；条件侧用“LR 全帧 + 稀疏位与 HD 的门控融合 + 位置/来源嵌入”构成逐帧 tokens 喂给 cross-attn；SVD 不吃 mask，所以一切稀疏/权重信息都编码进 tokens；监督集中在稀疏帧，同时用时序与感知损失稳住视频质量。

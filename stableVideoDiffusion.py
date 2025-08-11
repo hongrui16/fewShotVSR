@@ -16,7 +16,7 @@ pipe.to("cuda")
 
 prompt = "A man with short gray hair plays a red electric guitar."
 
-web_img_path= "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/guitar-man.png"
+web_img_path = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/guitar-man.png"
 
 def main(args):
     output_dir = args.output

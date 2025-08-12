@@ -195,7 +195,7 @@ class FewShotVideoSRTrainer:
 
         has_hd = (hd_frames is not None) and (sparse_indices is not None) and (sparse_indices.numel() > 0)
         if has_hd:
-            B2, C2, N, _, _ = hd_frames.shape
+            B2, N, C2, _, _ = hd_frames.shape
             assert B2 == B and C2 == 3 and N <= T
             hd_tok = self._encode_frames_clip(hd_frames)  # [B, N, D]
             hd_tok = hd_tok.to(base_dtype)  # Ensure same dtype as lr_tok

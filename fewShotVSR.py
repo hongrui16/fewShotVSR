@@ -321,7 +321,7 @@ class FewShotVideoSRTrainer:
         t = torch.randint(0, self.pipe.scheduler.config.num_train_timesteps, (B,)).to(self.device)
         
         ### add noise
-        gt_noise = torch.randn_like(full_hr_latents)
+        gt_noise = torch.randn_like(full_hr_latents, device=self.device)  # [B, T, C_latent, H, W]
         z_t = self.pipe.scheduler.add_noise(full_hr_latents, gt_noise, t)   ## [B, T, C_latent, H, W]
 
         

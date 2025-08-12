@@ -399,7 +399,7 @@ class FewShotVideoSRTrainer:
     def train(self, dataset, epochs=100, debug = False):
         for epoch in range(epochs):
             total_loss = 0.0
-            for batch in dataset:
+            for i, batch in enumerate(dataset):
                 # Assume batch = (lr_frames, hd_frames, sparse_indices)
                 lr_frames, hd_frames, sparse_indices = batch
                 loss = self.compute_loss(lr_frames, hd_frames, sparse_indices)
@@ -407,6 +407,8 @@ class FewShotVideoSRTrainer:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
                 total_loss += loss.item()
+                if i > 5:
+                    break
             avg_loss = total_loss / len(dataset)
             print(f"Epoch {epoch + 1}/{epochs}, Avg Loss: {avg_loss:.4f}")
             if debug:

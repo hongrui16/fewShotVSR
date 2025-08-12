@@ -366,8 +366,8 @@ class FewShotVideoSRTrainer:
         pred_original = pred_original.to(self.data_type)
 
         # Decode to pixel space
-        generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, T, C, H, W]
-
+        generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, C, T, H, W]
+        generated_video = generated_video.permute(0, 2, 1, 3, 4) ## [B, T, C, H, W]
         print(f'generated_video shape: {generated_video.shape}')
 
         generated_video_selected = generated_video.gather(1, video_indices) # [B, N, C, H, W]

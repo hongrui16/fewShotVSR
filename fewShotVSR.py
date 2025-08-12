@@ -26,7 +26,7 @@ class FewShotVideoSRTrainer:
             torch_dtype=torch.float16
         ).to(self.device)
 
-        print(self.pipe.scheduler.config.prediction_type)  # "epsilon" 或 "v_prediction"
+        print(self.pipe.scheduler.config.prediction_type)  # "v_prediction"
 
 
         self.unet_cross_attention_dim = self.pipe.unet.config.cross_attention_dim
@@ -317,8 +317,8 @@ class FewShotVideoSRTrainer:
 
         
         # Sample timestep
-        t = torch.randint(0, self.pipe.scheduler.config.num_train_timesteps, (B,)).to(self.device)
-        
+        t = torch.randint(0, self.pipe.scheduler.config.num_train_timesteps, (B,), dtype=torch.long).to(self.device)
+
         ### add noise
         gt_noise = torch.randn_like(full_hr_latents, device=self.device)  # [B, T, C_latent, H, W]
         z_t = self.pipe.scheduler.add_noise(full_hr_latents, gt_noise, t)   ## [B, T, C_latent, H, W]
@@ -333,9 +333,9 @@ class FewShotVideoSRTrainer:
         # Prepare UNet input: concat noisy target with LR conditioning
         latent_model_input = torch.cat([z_t, cond_lr_latents], dim=2)  # [1, T, 2*C, h, w]
 
-        
-        # Predict noise
-        predicted_noise = self.pipe.unet(
+
+        # Predict velocity
+        v_pred = self.pipe.unet(
             latent_model_input,
             t,
             encoder_hidden_states=image_embeddings,
@@ -347,12 +347,13 @@ class FewShotVideoSRTrainer:
 
         # Denoising loss
 
-        pre_noise_selected = predicted_noise.gather(1, indices)
-        gt_noise_selected = gt_noise.gather(1, indices)
-        L_denoise = nn.MSELoss()(pre_noise_selected, gt_noise_selected)
+        v_target = self.pipe.scheduler.get_velocity(full_hr_latents, gt_noise, t)  # 计算v_target
+        v_target_sel = v_target.gather(1, indices)
+        v_pred_sel = v_pred.gather(1, indices)
+        L_denoise = nn.MSELoss()(v_pred_sel, v_target_sel)
 
         # Get predicted original sample for additional losses
-        pred_original = self.pipe.scheduler.step(predicted_noise, t, z_t).pred_original_sample # [B, T, C_latent, h, w]
+        pred_original = self.pipe.scheduler.step(v_pred, t, z_t).pred_original_sample # [B, T, C_latent, h, w]
         pred_original = pred_original.clamp(-1, 1)  # [B, T, C_latent, h, w]
 
         # Decode to pixel space

@@ -1,5 +1,5 @@
 import torch
-from diffusers import DiffusionPipeline
+from diffusers import DiffusionPipeline, StableVideoDiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 
 import numpy as np
@@ -11,7 +11,7 @@ import argparse
 from PIL import Image
 
 
-pipe = DiffusionPipeline.from_pretrained("stabilityai/stable-video-diffusion-img2vid-xt", torch_dtype=torch.float16)
+pipe = StableVideoDiffusionPipeline.from_pretrained("stabilityai/stable-video-diffusion-img2vid", torch_dtype=torch.float16)
 pipe.to("cuda")
 
 prompt = "A man with short gray hair plays a red electric guitar."
@@ -43,7 +43,7 @@ def main(args):
     # output = pipe(image=image, prompt=prompt).frames[0]
     output = pipe(image=image).frames[0]
     if prompt is not None:
-        output = pipe(image=image, prompt=prompt).frames[0]
+        output = pipe(image=image).frames[0]
         video_path = os.path.join(output_dir, f"{basename}_prompt.mp4")
     else:
         output = pipe(image=image).frames[0]
@@ -53,7 +53,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Stable Video Diffusion")
-    parser.add_argument("--image_path", type=str, default=None, help="Path to input image")
+    parser.add_argument("--image_path", type=str, default='dog.jpg', help="Path to input image")
     parser.add_argument("--output", type=str, default= 'output', help="Path to save output video")
     parser.add_argument("--prompt", type=str, default=None, help="Text prompt for video generation")
     args = parser.parse_args()

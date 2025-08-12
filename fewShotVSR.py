@@ -20,7 +20,7 @@ class FewShotVideoSRTrainer:
         self.embed_dim = 768  # CLIP embed dimension
         # Load SVD pipeline
         self.pipe = StableVideoDiffusionPipeline.from_pretrained(
-            "stabilityai/stable-video-diffusion-img2vid-xt-1-1",
+            "stabilityai/stable-video-diffusion-img2vid",
             torch_dtype=torch.float16
         ).to(self.device)
 

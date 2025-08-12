@@ -352,8 +352,8 @@ class FewShotVideoSRTrainer:
         v_gt = sqrt_ab * gt_noise - sqrt_oma * full_hr_latents                 # [B,T,C,h,w]
 
         # （只对选帧算 loss：先在 v_pred/v_gt 上做 gather 再 MSE）
-        pre_v_selected = v_pred.gather(1, indices.view(B, -1, 1, 1, 1).expand_as(v_pred))
-        gt_v_selected  = v_gt.gather(1,  indices.view(B, -1, 1, 1, 1).expand_as(v_gt))
+        pre_v_selected = v_pred.gather(1, indices)
+        gt_v_selected  = v_gt.gather(1,  indices)
         L_denoise = nn.MSELoss()(pre_v_selected, gt_v_selected)
 
         # 7) 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）

@@ -302,7 +302,8 @@ class FewShotVideoSRTrainer:
         sparse_indices: tensor (B, N) (indices of HD frames to use for conditioning), length is N.
         
         '''
-
+        lr_frames = lr_frames.to(self.device, dtype=self.data_type)
+        hd_frames = hd_frames.to(self.device, dtype=self.data_type)
 
         # Get LR conditioning latents (separate)
         cond_lr_latents = self.get_frame_latents(lr_frames)
@@ -368,11 +369,12 @@ class FewShotVideoSRTrainer:
         # Decode to pixel space
         generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, C, T, H, W]
         generated_video = generated_video.permute(0, 2, 1, 3, 4) ## [B, T, C, H, W]
-        print(f'generated_video shape: {generated_video.shape}')
+        generated_video = generated_video.to(self.data_type)
+        # print(f'generated_video shape: {generated_video.shape}')
 
         generated_video_selected = generated_video.gather(1, video_indices) # [B, N, C, H, W]
-        print(f'generated_video_selected shape: {generated_video_selected.shape}')
-        print(f'hd_frames shape: {hd_frames.shape}')
+        # print(f'generated_video_selected shape: {generated_video_selected.shape}')
+        # print(f'hd_frames shape: {hd_frames.shape}')
 
         # Fidelity loss (L1 on full video)
         L_fid = nn.L1Loss()(generated_video_selected, hd_frames)  # Adjust dims if needed

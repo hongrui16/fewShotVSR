@@ -315,46 +315,50 @@ class FewShotVideoSRTrainer:
 
         full_hr_latents.scatter_(dim=1, index=indices, src=hr_latents)  # Place HR at sparse indices
 
-        
-        # Sample timestep
+        ## 1) Sample timestep
         t = torch.randint(0, self.pipe.scheduler.config.num_train_timesteps, (B,), dtype=torch.long).to(self.device)
+        # Get added time IDs
+        added_time_ids = self.get_added_time_ids(batch_size=B)
 
-        ### add noise
+        ### 2) add noise
         gt_noise = torch.randn_like(full_hr_latents, device=self.device)  # [B, T, C_latent, H, W]
         z_t = self.pipe.scheduler.add_noise(full_hr_latents, gt_noise, t)   ## [B, T, C_latent, H, W]
 
-        
+        ## 3)
         # Get HD embeddings with pos (separate)
         image_embeddings, _ = self.build_image_embeddings(lr_frames, hd_frames, sparse_indices)
         
-        # Get added time IDs
-        added_time_ids = self.get_added_time_ids(batch_size=B)
         
+        ## 4)
         # Prepare UNet input: concat noisy target with LR conditioning
         latent_model_input = torch.cat([z_t, cond_lr_latents], dim=2)  # [1, T, 2*C, h, w]
 
-
-        # Predict velocity
+        ## 5) Predict velocity
         v_pred = self.pipe.unet(
             latent_model_input,
             t,
             encoder_hidden_states=image_embeddings,
             added_time_ids=added_time_ids,
             return_dict=False
-        )[0]
+        )[0]   ### v_pred: [B, T, C_latent, h, w]
 
-        ### predicted_noise: [B, T, C_latent, h, w]
 
-        # Denoising loss
+        # 6) v-target（与 v_prediction 对齐）
+        #    先取 \bar{alpha}_t，再构造 v_gt = sqrt(ab)*ε - sqrt(1-ab)*x0
+        alpha_bar = self.pipe.scheduler.alphas_cumprod[t]                  # [B]
+        # 扩成 [B,1,1,1,1] 便于广播到 [B,T,C,h,w]
+        sqrt_ab  = alpha_bar.view(B, 1, 1, 1, 1).sqrt()
+        sqrt_oma = (1.0 - alpha_bar).view(B, 1, 1, 1, 1).sqrt()
+        v_gt = sqrt_ab * gt_noise - sqrt_oma * full_hr_latents                 # [B,T,C,h,w]
 
-        v_target = self.pipe.scheduler.get_velocity(full_hr_latents, gt_noise, t)  # 计算v_target
-        v_target_sel = v_target.gather(1, indices)
-        v_pred_sel = v_pred.gather(1, indices)
-        L_denoise = nn.MSELoss()(v_pred_sel, v_target_sel)
+        # （只对选帧算 loss：先在 v_pred/v_gt 上做 gather 再 MSE）
+        pre_v_selected = v_pred.gather(1, indices.view(B, -1, 1, 1, 1).expand_as(v_pred))
+        gt_v_selected  = v_gt.gather(1,  indices.view(B, -1, 1, 1, 1).expand_as(v_gt))
+        L_denoise = nn.MSELoss()(pre_v_selected, gt_v_selected)
 
-        # Get predicted original sample for additional losses
-        pred_original = self.pipe.scheduler.step(v_pred, t, z_t).pred_original_sample # [B, T, C_latent, h, w]
-        pred_original = pred_original.clamp(-1, 1)  # [B, T, C_latent, h, w]
+        # 7) 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
+        #    x0_hat = sqrt(ab)*x_t - sqrt(1-ab)*v_pred
+        pred_original = (sqrt_ab * z_t - sqrt_oma * v_pred).clamp(-1, 1)       # [B,T,C,h,w]
 
         # Decode to pixel space
         generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, T, C, H, W]

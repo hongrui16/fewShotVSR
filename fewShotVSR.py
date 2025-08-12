@@ -70,7 +70,7 @@ class FewShotVideoSRTrainer:
 
         # Scheduler
         self.pipe.scheduler = DPMSolverMultistepScheduler.from_config(self.pipe.scheduler.config)
-
+        self.pipe.scheduler.alphas_cumprod = self.pipe.scheduler.alphas_cumprod.to(self.device)
     
 
     def get_added_time_ids(self, batch_size=1):

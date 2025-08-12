@@ -367,7 +367,11 @@ class FewShotVideoSRTrainer:
         # Decode to pixel space
         generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, T, C, H, W]
 
+        print(f'generated_video shape: {generated_video.shape}')
+
         generated_video_selected = generated_video.gather(1, indices) # [B, N, C, H, W]
+        print(f'generated_video_selected shape: {generated_video_selected.shape}')
+
         # Fidelity loss (L1 on full video)
         L_fid = nn.L1Loss()(generated_video_selected, hd_frames)  # Adjust dims if needed
         

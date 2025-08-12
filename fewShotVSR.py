@@ -9,7 +9,7 @@ from torchvision.models.optical_flow import raft_small
 import numpy as np
 from PIL import Image
 
-
+from dummy_dataset import DummyFewShotDataset
 
 class FewShotVideoSRTrainer:
     def __init__(self, device="cuda"):
@@ -360,7 +360,7 @@ class FewShotVideoSRTrainer:
         # Total loss
         return L_denoise + 0.5 * L_fid + 0.5 * L_perc + 0.2 * L_lr_temp + 0.1 * L_hd_temp
 
-    def train(self, dataset, epochs=100):
+    def train(self, dataset, epochs=100, debug = False):
         for epoch in range(epochs):
             total_loss = 0.0
             for batch in dataset:
@@ -373,15 +373,12 @@ class FewShotVideoSRTrainer:
                 total_loss += loss.item()
             avg_loss = total_loss / len(dataset)
             print(f"Epoch {epoch + 1}/{epochs}, Avg Loss: {avg_loss:.4f}")
+            if debug:
+                break
         print("Training complete.")
 
 
-# Dummy dataset
-hr_lr_dataset = [
-    (np.random.randint(0, 255, (256, 256, 3), dtype=np.uint8),
-     np.random.randint(0, 255, (256, 256, 3), dtype=np.uint8))
-    for _ in range(3)
-]
-
-trainer = FewShotVideoSRTrainer(device="cuda")
-trainer.train(hr_lr_dataset, epochs=10)
+if __name__ == "__main__":
+    dataset = DummyFewShotDataset()
+    trainer = FewShotVideoSRTrainer(device="cuda")
+    trainer.train(dataset, epochs=10, debug=True)

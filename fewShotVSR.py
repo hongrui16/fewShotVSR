@@ -91,17 +91,14 @@ class FewShotVideoSRTrainer:
         """
         Compute temporal consistency loss based on optical flow.
         
-        generated_frames: [B, 3, T, H, W] - generated video
-        gt_frames:        [B, 3, T, H, W] - ground truth reference video (LR or HD)
+        generated_frames: [B, T, 3, H, W] - generated video
+        gt_frames:        [B, T, 3, H, W] - ground truth reference video (LR or HD)
         """
-        B, C, T, H, W = generated_frames.shape
+        B, T, C, H, W = generated_frames.shape
 
         # 帧数不足 2 无法计算光流
         if T <= 1:
             return torch.tensor(0.0, device=self.device)
-
-        generated_frames = generated_frames.permute(0, 2, 1, 3, 4)  # [B, T, 3, H, W]
-        gt_frames = gt_frames.permute(0, 2, 1, 3, 4)  # [B, T, 3, H, W]
 
         L_temp = 0.0
         count = 0
@@ -140,12 +137,11 @@ class FewShotVideoSRTrainer:
 
     def get_hd_embeddings(self, hd_frames, sparse_indices):
         """
-        hd_frames: tensor (B, 3, N, H, W) HD视频帧
+        hd_frames: tensor (B, N, 3, H, W) HD视频帧
         sparse_indices: tensor (B, N) 对应帧索引（顺序对应 hd_frames）
         Returns: tensor (B, N, embed_dim)
         """
-        B, C, N, H, W = hd_frames.shape
-        hd_frames = hd_frames.permute(0, 2, 1, 3, 4)  # [B, N, 3, H, W]
+        B, N, C, H, W = hd_frames.shape
         # 展平 batch 和时间维度，送入 CLIP image encoder
         frames_flat = hd_frames.reshape(B * N, C, H, W) # [BN, 3, H, W]
         # 提取图像特征
@@ -314,7 +310,7 @@ class FewShotVideoSRTrainer:
 
         indices = sparse_indices.unsqueeze(2).unsqueeze(-1).unsqueeze(-1).expand(B, N, C_latent, H, W).long()
 
-        full_hr_latents.scatter_(dim=2, index=indices, src=hr_latents)  # Place HR at sparse indices
+        full_hr_latents.scatter_(dim=1, index=indices, src=hr_latents)  # Place HR at sparse indices
 
         
         # Sample timestep
@@ -358,16 +354,16 @@ class FewShotVideoSRTrainer:
         pred_original = pred_original.clamp(-1, 1)  # [B, T, C_latent, h, w]
 
         # Decode to pixel space
-        generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14
+        generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, T, C, H, W]
 
-        generated_video_selected = generated_video.gather(1, indices)
+        generated_video_selected = generated_video.gather(1, indices) # [B, N, C, H, W]
         # Fidelity loss (L1 on full video)
         L_fid = nn.L1Loss()(generated_video_selected, hd_frames)  # Adjust dims if needed
         
         # Perceptual loss (average over frames)
 
         L_perc = 0.0
-        N = hd_frames.shape[2]
+        N = hd_frames.shape[1]
         for i in range(N):
             L_perc += self.lpips(generated_video_selected[:, i, :, :, :], hd_frames[:, i, :, :, :])
         L_perc /= N

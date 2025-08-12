@@ -57,6 +57,9 @@ class FewShotVideoSRTrainer:
         self.pipe.unet = get_peft_model(self.pipe.unet, lora_config)
         print("LoRA applied.")
 
+
+        self.data_type = self.pipe.unet.dtype
+        print(f'data type: {self.data_type}')
         self.chunk_size = 8
        
         # LPIPS
@@ -321,7 +324,7 @@ class FewShotVideoSRTrainer:
         added_time_ids = self.get_added_time_ids(batch_size=B)
 
         ### 2) add noise
-        gt_noise = torch.randn_like(full_hr_latents, device=self.device)  # [B, T, C_latent, H, W]
+        gt_noise = torch.randn_like(full_hr_latents, device=self.device, dtype=self.data_type)  # [B, T, C_latent, H, W]
         z_t = self.pipe.scheduler.add_noise(full_hr_latents, gt_noise, t)   ## [B, T, C_latent, H, W]
 
         ## 3)
@@ -359,6 +362,7 @@ class FewShotVideoSRTrainer:
         # 7) 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
         #    x0_hat = sqrt(ab)*x_t - sqrt(1-ab)*v_pred
         pred_original = (sqrt_ab * z_t - sqrt_oma * v_pred).clamp(-1, 1)       # [B,T,C,h,w]
+        pred_original = pred_original.to(self.data_type)
 
         # Decode to pixel space
         generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, T, C, H, W]

@@ -192,6 +192,7 @@ class FewShotVideoSRTrainer:
 
         # 1) LR full sequence base
         lr_tok = self._encode_frames_clip(lr_frames)  # [B, T, D]
+        base_dtype = lr_tok.dtype
         tokens = lr_tok.clone()
         attn_mask = torch.zeros(B, T, device=device)
 
@@ -200,11 +201,13 @@ class FewShotVideoSRTrainer:
             B2, C2, N, _, _ = hd_frames.shape
             assert B2 == B and C2 == 3 and N <= T
             hd_tok = self._encode_frames_clip(hd_frames)  # [B, N, D]
+            hd_tok = hd_tok.to(base_dtype)  # Ensure same dtype as lr_tok
 
             idx = sparse_indices.long()  # [B, N]
             D = lr_tok.size(-1)
             idx_exp = idx.unsqueeze(-1).expand(B, N, D)
             lr_at_idx = lr_tok.gather(1, idx_exp)  # [B, N, D]
+            lr_at_idx = lr_at_idx.to(base_dtype)  # Ensure same dtype
 
             # Gated fusion
             if use_adaptive_gate:
@@ -213,6 +216,7 @@ class FewShotVideoSRTrainer:
             else:
                 g = torch.sigmoid(self.hd_gate).view(1, 1, 1)  # Scalar [1,1,1]
 
+            g = g.to(base_dtype)  # Ensure same dtype
             fused = g * hd_tok + (1 - g) * lr_at_idx  # [B, N, D]
             tokens.scatter_(1, idx_exp, fused)  # Write back
             attn_mask.scatter_(1, idx, torch.ones_like(idx, dtype=attn_mask.dtype))

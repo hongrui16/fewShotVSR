@@ -343,7 +343,7 @@ class FewShotVideoSRTrainer:
             encoder_hidden_states=image_embeddings,
             added_time_ids=added_time_ids,
             return_dict=False
-        )[0]   ### v_pred: [B, T, C_latent, h, w]
+        )[0]   ### v_pred: [B, T, C_latent, h, w], here is [B, 14, 4, 32, 32]
 
 
         # 6) v-target（与 v_prediction 对齐）

@@ -349,8 +349,8 @@ class FewShotVideoSRTrainer:
 
         # Denoising loss
 
-        pre_noise_selected = predicted_noise.gather(2, indices)
-        gt_noise_selected = gt_noise.gather(2, indices)
+        pre_noise_selected = predicted_noise.gather(1, indices)
+        gt_noise_selected = gt_noise.gather(1, indices)
         L_denoise = nn.MSELoss()(pre_noise_selected, gt_noise_selected)
 
         # Get predicted original sample for additional losses
@@ -358,9 +358,9 @@ class FewShotVideoSRTrainer:
         pred_original = pred_original.clamp(-1, 1)  # [B, T, C_latent, h, w]
 
         # Decode to pixel space
-        generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[2])  # 默认decode_chunk_size=14
+        generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14
 
-        generated_video_selected = generated_video.gather(2, indices)
+        generated_video_selected = generated_video.gather(1, indices)
         # Fidelity loss (L1 on full video)
         L_fid = nn.L1Loss()(generated_video_selected, hd_frames)  # Adjust dims if needed
         

@@ -312,7 +312,7 @@ class FewShotVideoSRTrainer:
 
         full_hr_latents = cond_lr_latents.clone()  # Start with LR everywhere
 
-        indices = sparse_indices.unsqueeze(1).unsqueeze(-1).unsqueeze(-1).expand(B, N, C_latent, H, W).long()
+        indices = sparse_indices.unsqueeze(2).unsqueeze(-1).unsqueeze(-1).expand(B, N, C_latent, H, W).long()
 
         full_hr_latents.scatter_(dim=2, index=indices, src=hr_latents)  # Place HR at sparse indices
 

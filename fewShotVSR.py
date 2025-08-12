@@ -158,11 +158,12 @@ class FewShotVideoSRTrainer:
     @torch.no_grad()
     def _encode_frames_clip(self, frames):
         """
-        Helper to encode frames with CLIP: [B, C, T, H, W] -> [B, T, D]
+        frames: shape [B, T, C, H, W]
+        Helper to encode frames with CLIP: [B, T, C, H, W] -> [B, T, D]
         Handles chunking if needed.
         """
-        B, C, T, H, W = frames.shape
-        flat = frames.permute(0,2,1,3,4).reshape(B*T, C, H, W)
+        B, T, C, H, W = frames.shape
+        flat = frames.reshape(B*T, C, H, W)
 
         # CLIP 的输入分辨率，224×224
         clip_res = self.pipe.feature_extractor.size if hasattr(self.pipe, "feature_extractor") else 224
@@ -186,7 +187,7 @@ class FewShotVideoSRTrainer:
           - Handles N=0/1/2 seamlessly
           - spread_radius: Spread HD influence to nearby r frames (0/1/2)
         """
-        B, C, T, H, W = lr_frames.shape
+        B, T, C, H, W = lr_frames.shape
         assert T <= self.T_max
         device = lr_frames.device
 
@@ -259,11 +260,11 @@ class FewShotVideoSRTrainer:
     def get_frame_latents(self, frames_tensor: torch.Tensor):
         """
         Encode video frames to latents using _encode_vae_image, handling multi-frame.
-        frames_tensor: [B, 3, T, H, W]
-        Returns: [B, C_latent, T, h, w]
+        frames_tensor: [B, T, 3, H, W]
+        Returns: [B, T, C_latent,h, w]
         """
-        B, C, T, H, W = frames_tensor.shape
-        frames_flat = frames_tensor.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)  # [B*T, 3, H, W]
+        B, T, C, H, W = frames_tensor.shape
+        frames_flat = frames_tensor.reshape(B * T, C, H, W)  # [B*T, 3, H, W]
 
         ## convert the frame_tensor to the required data format
         frames_flat = frames_flat.to(self.pipe.vae.dtype)  # Ensure dtype matches VAE
@@ -283,8 +284,8 @@ class FewShotVideoSRTrainer:
                 latents.append(latent_chunk)
         
         latents = torch.cat(latents, dim=0)  # [B*T, C_latent, h, w]
-        latents = latents.reshape(B, T, *latents.shape[1:]).permute(0, 2, 1, 3, 4)  # [B, C_latent, T, h, w]
-        
+        latents = latents.reshape(B, T, *latents.shape[1:])  # [B, T, C_latent, h, w]
+
         # SVD latent通常需乘scaling factor（从VAE config获取）
         latents = latents * self.pipe.vae.config.scaling_factor
         
@@ -294,8 +295,8 @@ class FewShotVideoSRTrainer:
         '''
         Compute the loss for a batch of LR and HD frames.
         
-        lr_frames: tensor (B, 3, T, H, W)
-        hd_frames: tensor (B, 3, N, H, W)
+        lr_frames: tensor (B, T, 3, H, W)
+        hd_frames: tensor (B, N, 3, H, W)
         sparse_indices: tensor (B, N) (indices of HD frames to use for conditioning), length is N.
         
         '''
@@ -305,13 +306,13 @@ class FewShotVideoSRTrainer:
         cond_lr_latents = self.get_frame_latents(lr_frames)
 
         hr_latents = self.get_frame_latents(hd_frames)  # 
-        B, C, N, H, W = hr_latents.shape
+        B, N, C_latent, H, W = hr_latents.shape
 
-        B, C, T, H, W = cond_lr_latents.shape
+        B, T, C_latent, H, W = cond_lr_latents.shape
 
         full_hr_latents = cond_lr_latents.clone()  # Start with LR everywhere
 
-        indices = sparse_indices.unsqueeze(1).unsqueeze(-1).unsqueeze(-1).expand(B, C, N, H, W).long() 
+        indices = sparse_indices.unsqueeze(1).unsqueeze(-1).unsqueeze(-1).expand(B, N, C_latent, H, W).long()
 
         full_hr_latents.scatter_(dim=2, index=indices, src=hr_latents)  # Place HR at sparse indices
 
@@ -321,7 +322,7 @@ class FewShotVideoSRTrainer:
         
         ### add noise
         gt_noise = torch.randn_like(full_hr_latents)
-        z_t = self.pipe.scheduler.add_noise(full_hr_latents, gt_noise, t)
+        z_t = self.pipe.scheduler.add_noise(full_hr_latents, gt_noise, t)   ## [B, T, C_latent, H, W]
 
         
         # Get HD embeddings with pos (separate)
@@ -331,7 +332,9 @@ class FewShotVideoSRTrainer:
         added_time_ids = self.get_added_time_ids(batch_size=B)
         
         # Prepare UNet input: concat noisy target with LR conditioning
-        latent_model_input = torch.cat([z_t, cond_lr_latents], dim=1)  # [1, 2*C, T, h, w]
+        latent_model_input = torch.cat([z_t, cond_lr_latents], dim=2)  # [1, T, 2*C, h, w]
+
+        latent_model_input = latent_model_input.permute(0, 2, 1, 3, 4)  # [B, C_latent*2, T, h, w]
         
         # Predict noise
         predicted_noise = self.pipe.unet(
@@ -341,7 +344,9 @@ class FewShotVideoSRTrainer:
             added_time_ids=added_time_ids,
             return_dict=False
         )[0]
-        
+
+        ### predicted_noise: [B, T, C_latent, h, w]
+
         # Denoising loss
 
         pre_noise_selected = predicted_noise.gather(2, indices)
@@ -349,10 +354,9 @@ class FewShotVideoSRTrainer:
         L_denoise = nn.MSELoss()(pre_noise_selected, gt_noise_selected)
 
         # Get predicted original sample for additional losses
-        pred_original = self.pipe.scheduler.step(predicted_noise, t, z_t).pred_original_sample # [B, C, T, h, w]
-        pred_original = pred_original.clamp(-1, 1)  # [B, C, T, h, w]
+        pred_original = self.pipe.scheduler.step(predicted_noise, t, z_t).pred_original_sample # [B, T, C_latent, h, w]
+        pred_original = pred_original.clamp(-1, 1)  # [B, T, C_latent, h, w]
 
-        
         # Decode to pixel space
         generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[2])  # 默认decode_chunk_size=14
 
@@ -365,7 +369,7 @@ class FewShotVideoSRTrainer:
         L_perc = 0.0
         N = hd_frames.shape[2]
         for i in range(N):
-            L_perc += self.lpips(generated_video_selected[:, :, i, :, :], hd_frames[:, :, i, :, :])
+            L_perc += self.lpips(generated_video_selected[:, i, :, :, :], hd_frames[:, i, :, :, :])
         L_perc /= N
 
         # Temporal loss (normalize frames to [0,1] for RAFT)

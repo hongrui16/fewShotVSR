@@ -325,7 +325,7 @@ class FewShotVideoSRTrainer:
 
         
         # Get HD embeddings with pos (separate)
-        image_embeddings = self.build_image_embeddings(lr_frames, hd_frames, sparse_indices)
+        image_embeddings, _ = self.build_image_embeddings(lr_frames, hd_frames, sparse_indices)
         
         # Get added time IDs
         added_time_ids = self.get_added_time_ids(batch_size=B)

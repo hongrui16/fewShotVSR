@@ -290,6 +290,7 @@ class FewShotVideoSRTrainer:
         cond_lr_latents = self.get_frame_latents(lr_frames)
 
         hr_latents = self.get_frame_latents(hd_frames)  # 
+        B, C, N, H, W = hr_latents.shape
 
         B, C, T, H, W = cond_lr_latents.shape
 

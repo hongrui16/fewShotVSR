@@ -249,7 +249,10 @@ class FewShotVideoSRTrainer:
         """
         B, C, T, H, W = frames_tensor.shape
         frames_flat = frames_tensor.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)  # [B*T, 3, H, W]
-        
+
+        ## convert the frame_tensor to the required data format
+        frames_flat = frames_flat.to(self.pipe.vae.dtype)  # Ensure dtype matches VAE
+
         latents = []
         with torch.no_grad():
             chunk_size = self.chunk_size  # 调整以防OOM，小于T即可

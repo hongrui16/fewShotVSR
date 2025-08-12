@@ -33,7 +33,7 @@ class FewShotVideoSRTrainer:
             nn.ReLU(),
             nn.Linear(128, 1)  # Output scalar per-frame g
         ).to(self.device)
-        self.pos_abs = nn.Embedding(self.num_frames, self.embed_dim).to(self.device)  # Learnable positional encoding
+        self.pos_abs = nn.Embedding(self.num_frames, self.unet_cross_attention_dim).to(self.device)  # Learnable positional encoding
         self.src_type = nn.Embedding(2, self.embed_dim).to(self.device)  # 0: LR, 1: HD
         self.cross_proj = nn.Linear(self.embed_dim, self.unet_cross_attention_dim).to(self.device)  # Projection if needed
         self.cond_ln = nn.LayerNorm(self.unet_cross_attention_dim).to(self.device)

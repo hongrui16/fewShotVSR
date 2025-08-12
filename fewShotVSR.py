@@ -26,6 +26,9 @@ class FewShotVideoSRTrainer:
             torch_dtype=torch.float16
         ).to(self.device)
 
+        print(self.pipe.scheduler.config.prediction_type)  # "epsilon" 或 "v_prediction"
+
+
         self.unet_cross_attention_dim = self.pipe.unet.config.cross_attention_dim
         self.hd_gate = nn.Parameter(torch.tensor(-1.0, device= self.device))  # Init low (~0.27) for early stability
         self.g_mlp = nn.Sequential(
@@ -330,7 +333,6 @@ class FewShotVideoSRTrainer:
         # Prepare UNet input: concat noisy target with LR conditioning
         latent_model_input = torch.cat([z_t, cond_lr_latents], dim=2)  # [1, T, 2*C, h, w]
 
-        # latent_model_input = latent_model_input.permute(0, 2, 1, 3, 4)  # [B, C_latent*2, T, h, w]
         
         # Predict noise
         predicted_noise = self.pipe.unet(

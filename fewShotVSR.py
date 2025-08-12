@@ -8,6 +8,8 @@ from torchmetrics.image import LearnedPerceptualImagePatchSimilarity
 from torchvision.models.optical_flow import raft_small
 import numpy as np
 from PIL import Image
+import torch.nn.functional as F
+
 
 from dummy_dataset import DummyFewShotDataset
 
@@ -161,6 +163,15 @@ class FewShotVideoSRTrainer:
         """
         B, C, T, H, W = frames.shape
         flat = frames.permute(0,2,1,3,4).reshape(B*T, C, H, W)
+
+        # CLIP 的输入分辨率，224×224
+        clip_res = self.pipe.feature_extractor.size if hasattr(self.pipe, "feature_extractor") else 224
+        if isinstance(clip_res, dict):  # 兼容 {"shortest_edge": 224} 
+            clip_res = clip_res.get("shortest_edge", 224)
+
+        flat = F.interpolate(flat, size=(clip_res, clip_res), mode="bilinear", align_corners=False)
+
+
 
         embeds = self.pipe._encode_image(flat, self.device, 1, False).reshape(B, T, -1)
         return embeds

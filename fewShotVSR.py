@@ -350,6 +350,8 @@ class FewShotVideoSRTrainer:
             return_dict=False
         )[0]   ### v_pred: [B, T, C_latent, h, w], here is [B, 14, 4, 32, 32]
 
+        print('type of v_pred:', v_pred.dtype)
+        print('type of self.pipe.scheduler.alphas_cumprod:', self.pipe.scheduler.alphas_cumprod.dtype)
 
         # 6) v-target（与 v_prediction 对齐）
         #    先取 \bar{alpha}_t，再构造 v_gt = sqrt(ab)*ε - sqrt(1-ab)*x0
@@ -358,6 +360,7 @@ class FewShotVideoSRTrainer:
         sqrt_ab  = alpha_bar.view(B, 1, 1, 1, 1).sqrt()
         sqrt_oma = (1.0 - alpha_bar).view(B, 1, 1, 1, 1).sqrt()
         v_gt = sqrt_ab * gt_noise - sqrt_oma * full_hr_latents                 # [B,T,C,h,w]
+        print('type of v_gt:', v_gt.dtype)
 
         # （只对选帧算 loss：先在 v_pred/v_gt 上做 gather 再 MSE）
         pre_v_selected = v_pred.gather(1, indices)

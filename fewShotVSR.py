@@ -405,7 +405,7 @@ class FewShotVideoSRTrainer:
 
         # Perceptual loss (average over frames)
 
-        L_perc = 0.0
+        L_perc = torch.tensor(0.0, device=self.device, dtype=self.data_type)  # Initialize
         N = hd_frames.shape[1]
         if N > 0:
             with torch.no_grad():

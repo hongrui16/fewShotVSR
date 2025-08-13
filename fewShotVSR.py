@@ -108,8 +108,8 @@ class FewShotVideoSRTrainer:
 
         L_temp = 0.0
         count = 0
-        generated_frames = generated_frames.to(float)
-        gt_frames = gt_frames.to(float)
+        generated_frames = generated_frames.to(torch.float32)
+        gt_frames = gt_frames.to(torch.float32)
         for b in range(B):
             for i in range(T - 1):
                 gen1 = generated_frames[b, i].unsqueeze(0)

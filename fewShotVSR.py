@@ -59,7 +59,7 @@ class FewShotVideoSRTrainer:
 
 
         self.data_type = self.pipe.unet.dtype
-        print(f'data type: {self.data_type}')
+        print(f'data_type: {self.data_type}')
         self.chunk_size = 8
        
         # LPIPS
@@ -125,7 +125,7 @@ class FewShotVideoSRTrainer:
                 count += 1
 
         loss =  L_temp / count if count > 0 else torch.tensor(0.0, device=self.device)
-        loss = loss.to(self.data_type)
+        # loss = loss.to(self.data_type)
         return loss
 
 
@@ -349,8 +349,9 @@ class FewShotVideoSRTrainer:
             added_time_ids=added_time_ids,
             return_dict=False
         )[0]   ### v_pred: [B, T, C_latent, h, w], here is [B, 14, 4, 32, 32]
-
         # print('type of v_pred:', v_pred.dtype) #float16
+        v_pred = v_pred.to(torch.float32)  # Ensure float32 for precision
+
         # print('type of self.pipe.scheduler.alphas_cumprod:', self.pipe.scheduler.alphas_cumprod.dtype) #float32
 
         # 6) v-target（与 v_prediction 对齐）
@@ -359,16 +360,19 @@ class FewShotVideoSRTrainer:
         # 扩成 [B,1,1,1,1] 便于广播到 [B,T,C,h,w]
         sqrt_ab  = alpha_bar.view(B, 1, 1, 1, 1).sqrt()
         sqrt_oma = (1.0 - alpha_bar).view(B, 1, 1, 1, 1).sqrt()
+        gt_noise = gt_noise.to(torch.float32)  # Ensure float32 for precision
+        full_hr_latents = full_hr_latents.to(torch.float32)  # Ensure float32 for precision
         v_gt = sqrt_ab * gt_noise - sqrt_oma * full_hr_latents                 # [B,T,C,h,w]
         # print('type of v_gt:', v_gt.dtype) #float32
 
         # （只对选帧算 loss：先在 v_pred/v_gt 上做 gather 再 MSE）
-        pre_v_selected = v_pred.gather(1, indices).to(self.data_type)  # [B, N, C_latent, H, W]
+        pre_v_selected = v_pred.gather(1, indices)  # [B, N, C_latent, H, W]
         gt_v_selected  = v_gt.gather(1,  indices)
-        L_denoise = nn.MSELoss()(pre_v_selected, gt_v_selected).to(self.data_type)
+        L_denoise = nn.MSELoss()(pre_v_selected, gt_v_selected)
 
         # 7) 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
         #    x0_hat = sqrt(ab)*x_t - sqrt(1-ab)*v_pred
+        z_t = z_t.to(torch.float32)  # Ensure float32 for precision
         pred_original = (sqrt_ab * z_t - sqrt_oma * v_pred).clamp(-1, 1)       # [B,T,C,h,w]
         pred_original = pred_original.to(self.data_type)
 
@@ -401,30 +405,32 @@ class FewShotVideoSRTrainer:
         L_lr_temp = self.compute_temporal_loss(gen_norm, lr_norm)
         L_hd_temp = self.compute_temporal_loss(hd_selected_norm, hd_norm)
 
-        # print('type of L_denoise:', L_denoise.dtype)
-        # print('type of L_fid:', L_fid.dtype)
-        # print('type of L_lr_temp:', L_lr_temp.dtype)
-        # print('type of L_hd_temp:', L_hd_temp.dtype)
+        print('type of L_denoise:', L_denoise.dtype)
+        print('type of L_fid:', L_fid.dtype)
+        print('type of L_lr_temp:', L_lr_temp.dtype)
+        print('type of L_hd_temp:', L_hd_temp.dtype)
 
         # Total loss
         loss = L_denoise + 0.5 * L_fid + 0.5 * L_perc + 0.2 * L_lr_temp + 0.1 * L_hd_temp
-        loss = loss.to(self.data_type)  # Ensure same dtype as UNet
+        # loss = loss.to(self.data_type)  # Ensure same dtype as UNet
         return loss
 
     def train(self, dataset, epochs=100, debug = False):
         for epoch in range(epochs):
             total_loss = 0.0
             for i, batch in enumerate(dataset):
-                # Assume batch = (lr_frames, hd_frames, sparse_indices)
-                lr_frames, hd_frames, sparse_indices = batch
-                loss = self.compute_loss(lr_frames, hd_frames, sparse_indices)
-                print('type of loss:', loss.dtype)
-                loss.backward()
-                self.optimizer.step()
-                self.optimizer.zero_grad()
-                total_loss += loss.item()
-                if debug and i > 5:
-                    break
+                self.optimizer.zero_grad(set_to_none=True)
+                with torch.autocast(self.device, dtype=torch.float16):
+                    # Assume batch = (lr_frames, hd_frames, sparse_indices)
+                    lr_frames, hd_frames, sparse_indices = batch
+                    loss = self.compute_loss(lr_frames, hd_frames, sparse_indices)
+                    print('type of loss:', loss.dtype)
+                    loss.backward()
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+                    total_loss += loss.item()
+                    if debug and i > 5:
+                        break
             avg_loss = total_loss / len(dataset)
             print(f"Epoch {epoch + 1}/{epochs}, Avg Loss: {avg_loss:.4f}")
             if debug and epoch > 2:

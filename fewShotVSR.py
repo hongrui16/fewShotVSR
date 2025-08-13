@@ -104,11 +104,12 @@ class FewShotVideoSRTrainer:
 
         # 帧数不足 2 无法计算光流
         if T <= 1:
-            return torch.tensor(0.0, device=self.device)
+            return torch.tensor(0.0, device=self.device, dtype=self.data_type)
 
         L_temp = 0.0
         count = 0
-
+        generated_frames = generated_frames.to(float)
+        gt_frames = gt_frames.to(float)
         for b in range(B):
             for i in range(T - 1):
                 gen1 = generated_frames[b, i].unsqueeze(0)
@@ -123,7 +124,9 @@ class FewShotVideoSRTrainer:
                 L_temp += nn.MSELoss()(flow_gen, flow_gt)
                 count += 1
 
-        return L_temp / count if count > 0 else torch.tensor(0.0, device=self.device)
+        loss =  L_temp / count if count > 0 else torch.tensor(0.0, device=self.device)
+        loss = loss.to(self.data_type)
+        return loss
 
 
     def positional_encoding(self, pos_ids):

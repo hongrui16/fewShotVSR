@@ -450,7 +450,7 @@ class FewShotVideoSRTrainer:
                     if debug and i > 5:
                         break
             avg_loss = total_loss / len(dataset)
-            print(f"Epoch {epoch + 1}/{epochs}, Avg Loss: {avg_loss:.4f}")
+            print(f"Epoch {epoch + 1}/{epochs}, Avg Loss: {avg_loss:.4f}\n")
             if debug and epoch > 2:
                 break
         print("Training complete.")

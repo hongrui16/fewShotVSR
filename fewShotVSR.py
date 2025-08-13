@@ -391,7 +391,8 @@ class FewShotVideoSRTrainer:
 
         # Fidelity loss (L1 on full video)
         L_fid = nn.L1Loss()(generated_video_selected, hd_frames)  # Adjust dims if needed
-        
+        L_fid = L_fid.to(self.data_type)
+
         # Perceptual loss (average over frames)
 
         L_perc = 0.0

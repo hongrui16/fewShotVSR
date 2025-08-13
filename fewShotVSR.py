@@ -391,6 +391,7 @@ class FewShotVideoSRTrainer:
         with torch.no_grad():
             generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, C, T, H, W]
             generated_video = generated_video.permute(0, 2, 1, 3, 4) ## [B, T, C, H, W]
+            generated_video = generated_video.clamp(-1, 1)
             generated_video = generated_video.to(self.data_type)
         # print(f'generated_video shape: {generated_video.shape}')
 

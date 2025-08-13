@@ -49,4 +49,5 @@ class DummyFewShotDataset:
                 # 可选：给 HD 加点微小扰动，避免完全相同
                 hd_frames = (hd_frames + 0.01 * torch.randn_like(hd_frames)).clamp(-1, 1)
 
+
             yield lr_frames, hd_frames, sparse_indices

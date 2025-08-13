@@ -125,7 +125,7 @@ class FewShotVideoSRTrainer:
                 count += 1
 
         loss =  L_temp / count if count > 0 else torch.tensor(0.0, device=self.device)
-        # loss = loss.to(self.data_type)
+        loss = loss.to(self.data_type)
         return loss
 
 
@@ -368,6 +368,8 @@ class FewShotVideoSRTrainer:
         # （只对选帧算 loss：先在 v_pred/v_gt 上做 gather 再 MSE）
         pre_v_selected = v_pred.gather(1, indices)  # [B, N, C_latent, H, W]
         gt_v_selected  = v_gt.gather(1,  indices)
+        pre_v_selected = pre_v_selected.to(self.data_type)  # Ensure same dtype as UNet
+        gt_v_selected = gt_v_selected.to(self.data_type)  # Ensure same dtype as
         L_denoise = nn.MSELoss()(pre_v_selected, gt_v_selected)
 
         # 7) 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
@@ -377,9 +379,10 @@ class FewShotVideoSRTrainer:
         pred_original = pred_original.to(self.data_type)
 
         # Decode to pixel space
-        generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, C, T, H, W]
-        generated_video = generated_video.permute(0, 2, 1, 3, 4) ## [B, T, C, H, W]
-        generated_video = generated_video.to(self.data_type)
+        with torch.no_grad():
+            generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, C, T, H, W]
+            generated_video = generated_video.permute(0, 2, 1, 3, 4) ## [B, T, C, H, W]
+            generated_video = generated_video.to(self.data_type)
         # print(f'generated_video shape: {generated_video.shape}')
 
         generated_video_selected = generated_video.gather(1, video_indices) # [B, N, C, H, W]
@@ -393,8 +396,9 @@ class FewShotVideoSRTrainer:
 
         L_perc = 0.0
         N = hd_frames.shape[1]
-        for i in range(N):
-            L_perc += self.lpips(generated_video_selected[:, i, :, :, :], hd_frames[:, i, :, :, :])
+        with torch.no_grad():
+            for i in range(N):
+                L_perc += self.lpips(generated_video_selected[:, i, :, :, :], hd_frames[:, i, :, :, :])
         L_perc /= N
 
         # Temporal loss (normalize frames to [0,1] for RAFT)

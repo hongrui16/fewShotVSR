@@ -418,6 +418,7 @@ class FewShotVideoSRTrainer:
                 # Assume batch = (lr_frames, hd_frames, sparse_indices)
                 lr_frames, hd_frames, sparse_indices = batch
                 loss = self.compute_loss(lr_frames, hd_frames, sparse_indices)
+                print('type of loss:', loss.dtype)
                 loss.backward()
                 self.optimizer.step()
                 self.optimizer.zero_grad()

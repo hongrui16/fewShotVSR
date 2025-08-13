@@ -421,10 +421,10 @@ class FewShotVideoSRTrainer:
         L_lr_temp = self.compute_temporal_loss(gen_norm, lr_norm)
         L_hd_temp = self.compute_temporal_loss(hd_selected_norm, hd_norm)
 
-        print('type of L_denoise:', L_denoise.dtype)
-        print('type of L_fid:', L_fid.dtype)
-        print('type of L_lr_temp:', L_lr_temp.dtype)
-        print('type of L_hd_temp:', L_hd_temp.dtype)
+        # print('type of L_denoise:', L_denoise.dtype)
+        # print('type of L_fid:', L_fid.dtype)
+        # print('type of L_lr_temp:', L_lr_temp.dtype)
+        # print('type of L_hd_temp:', L_hd_temp.dtype)
 
         # Total loss
         loss = L_denoise + 0.5 * L_fid + 0.5 * L_perc + 0.2 * L_lr_temp + 0.1 * L_hd_temp
@@ -440,7 +440,7 @@ class FewShotVideoSRTrainer:
                     # Assume batch = (lr_frames, hd_frames, sparse_indices)
                     lr_frames, hd_frames, sparse_indices = batch
                     loss = self.compute_loss(lr_frames, hd_frames, sparse_indices)
-                    print('type of loss:', loss.dtype)
+                    # print('type of loss:', loss.dtype)
                     loss.backward()
                     self.optimizer.step()
                     self.optimizer.zero_grad()

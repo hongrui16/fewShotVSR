@@ -406,10 +406,11 @@ class FewShotVideoSRTrainer:
 
         L_perc = 0.0
         N = hd_frames.shape[1]
-        with torch.no_grad():
-            for i in range(N):
-                L_perc += self.lpips(generated_video_selected[:, i, :, :, :], hd_frames[:, i, :, :, :]).to(self.data_type)
-        L_perc /= N
+        if N > 0:
+            with torch.no_grad():
+                for i in range(N):
+                    L_perc += self.lpips(generated_video_selected[:, i, :, :, :], hd_frames[:, i, :, :, :]).to(self.data_type)
+            L_perc /= N
 
         # Temporal loss (normalize frames to [0,1] for RAFT)
         gen_norm = (generated_video.clamp(-1, 1) + 1) / 2

@@ -48,7 +48,12 @@ def main(args):
     else:
         output = pipe(image=image).frames[0]
         video_path = os.path.join(output_dir, f"{basename}.mp4")
-    export_to_video(output, video_path)
+
+    new_output = []
+    for frame in output:
+        frame = cv2.resize(frame, (width, height))
+        new_output.append(frame)
+    export_to_video(new_output, video_path)
     print(f"Video saved to {video_path}")
 
 if __name__ == "__main__":

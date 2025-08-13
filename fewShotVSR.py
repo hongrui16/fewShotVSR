@@ -350,8 +350,8 @@ class FewShotVideoSRTrainer:
             return_dict=False
         )[0]   ### v_pred: [B, T, C_latent, h, w], here is [B, 14, 4, 32, 32]
 
-        print('type of v_pred:', v_pred.dtype)
-        print('type of self.pipe.scheduler.alphas_cumprod:', self.pipe.scheduler.alphas_cumprod.dtype)
+        # print('type of v_pred:', v_pred.dtype) #float16
+        # print('type of self.pipe.scheduler.alphas_cumprod:', self.pipe.scheduler.alphas_cumprod.dtype) #float32
 
         # 6) v-target（与 v_prediction 对齐）
         #    先取 \bar{alpha}_t，再构造 v_gt = sqrt(ab)*ε - sqrt(1-ab)*x0
@@ -360,12 +360,12 @@ class FewShotVideoSRTrainer:
         sqrt_ab  = alpha_bar.view(B, 1, 1, 1, 1).sqrt()
         sqrt_oma = (1.0 - alpha_bar).view(B, 1, 1, 1, 1).sqrt()
         v_gt = sqrt_ab * gt_noise - sqrt_oma * full_hr_latents                 # [B,T,C,h,w]
-        print('type of v_gt:', v_gt.dtype)
+        # print('type of v_gt:', v_gt.dtype) #float32
 
         # （只对选帧算 loss：先在 v_pred/v_gt 上做 gather 再 MSE）
-        pre_v_selected = v_pred.gather(1, indices)
+        pre_v_selected = v_pred.gather(1, indices).to(self.data_type)  # [B, N, C_latent, H, W]
         gt_v_selected  = v_gt.gather(1,  indices)
-        L_denoise = nn.MSELoss()(pre_v_selected, gt_v_selected)
+        L_denoise = nn.MSELoss()(pre_v_selected, gt_v_selected).to(self.data_type)
 
         # 7) 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
         #    x0_hat = sqrt(ab)*x_t - sqrt(1-ab)*v_pred

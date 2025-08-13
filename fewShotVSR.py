@@ -370,7 +370,7 @@ class FewShotVideoSRTrainer:
         gt_v_selected  = v_gt.gather(1,  indices)
         pre_v_selected = pre_v_selected.to(self.data_type)  # Ensure same dtype as UNet
         gt_v_selected = gt_v_selected.to(self.data_type)  # Ensure same dtype as
-        L_denoise = nn.MSELoss()(pre_v_selected, gt_v_selected)
+        L_denoise = nn.MSELoss()(pre_v_selected, gt_v_selected).to(self.data_type)  # [B, N, C_latent, H, W] -> scalar
 
         # 7) 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
         #    x0_hat = sqrt(ab)*x_t - sqrt(1-ab)*v_pred
@@ -398,7 +398,7 @@ class FewShotVideoSRTrainer:
         N = hd_frames.shape[1]
         with torch.no_grad():
             for i in range(N):
-                L_perc += self.lpips(generated_video_selected[:, i, :, :, :], hd_frames[:, i, :, :, :])
+                L_perc += self.lpips(generated_video_selected[:, i, :, :, :], hd_frames[:, i, :, :, :]).to(self.data_type)
         L_perc /= N
 
         # Temporal loss (normalize frames to [0,1] for RAFT)

@@ -269,6 +269,15 @@ class FewShotVideoSRTrainer:
         Returns: [B, T, C_latent,h, w]
         """
         B, T, C, H, W = frames_tensor.shape
+        ## If no frames, return an empty latent tensor with correct shape/dtype/device
+        if T == 0 or frames_tensor.numel() == 0:
+            vae = self.pipe.vae
+            vae_sf = getattr(self.pipe, "vae_scale_factor", 8)  # diffusers provides this; fallback=8
+            latent_ch = getattr(vae.config, "latent_channels", 4)  # SD/SVD usually 4
+            h, w = H // vae_sf, W // vae_sf
+            return torch.empty(B, 0, latent_ch, h, w, device=self.device, dtype=vae.dtype)
+
+
         frames_flat = frames_tensor.reshape(B * T, C, H, W)  # [B*T, 3, H, W]
 
         ## convert the frame_tensor to the required data format

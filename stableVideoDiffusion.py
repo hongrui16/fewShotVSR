@@ -51,7 +51,7 @@ def main(args):
 
     new_output = []
     for frame in output:
-        frame = cv2.resize(frame, (width, height))
+        frame = frame.resize((width, height))
         new_output.append(frame)
     export_to_video(new_output, video_path)
     print(f"Video saved to {video_path}")

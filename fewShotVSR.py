@@ -28,19 +28,33 @@ class FewShotVideoSRTrainer:
 
         print(self.pipe.scheduler.config.prediction_type)  # "v_prediction"
 
+        self.do_classifier_free_guidance = self.pipe.do_classifier_free_guidance
+        print('self.do_classifier_free_guidance', self.do_classifier_free_guidance)
+
+        self.use_adaptive_gate = True
 
         self.unet_cross_attention_dim = self.pipe.unet.config.cross_attention_dim
-        self.hd_gate = nn.Parameter(torch.tensor(-1.0, device= self.device))  # Init low (~0.27) for early stability
-        self.g_mlp = nn.Sequential(
-            nn.Linear(3 * self.embed_dim, 128),  # For adaptive gate: input [LR, HD, |diff|] = 3D
-            nn.ReLU(),
-            nn.Linear(128, 1)  # Output scalar per-frame g
-        ).to(self.device)
+        
+
+        if self.use_adaptive_gate:
+            self.g_mlp = nn.Sequential(
+                nn.Linear(3 * self.embed_dim, 128),  # For adaptive gate: input [LR, HD, |diff|] = 3D
+                nn.ReLU(),
+                nn.Linear(128, 1)  # Output scalar per-frame g
+            ).to(self.device)
+        else:
+            self.hd_gate = nn.Parameter(torch.tensor(-1.0, device= self.device))  # Init low (~0.27) for early stability
+        
         self.pos_abs = nn.Embedding(self.num_frames, self.unet_cross_attention_dim).to(self.device)  # Learnable positional encoding
         self.src_type = nn.Embedding(2, self.unet_cross_attention_dim).to(self.device)  # 0: LR, 1: HD
         # self.cross_proj = nn.Linear(self.embed_dim, self.unet_cross_attention_dim).to(self.device)  # Projection if needed
         # self.cond_ln = nn.LayerNorm(self.unet_cross_attention_dim).to(self.device)
         self.T_max = self.num_frames  # 14
+
+        mid = (self.T_max - 1) // 2
+        self.register_buffer("fixed_indices", torch.tensor([0, mid], dtype=torch.long))
+        self.N = 2  # 槽位数（few-shot 数）
+
 
         # Freeze VAE
         for param in self.pipe.vae.parameters():
@@ -97,13 +111,13 @@ class FewShotVideoSRTrainer:
         """
         Compute temporal consistency loss based on optical flow.
         
-        generated_frames: [B, T, 3, H, W] - generated video
-        gt_frames:        [B, T, 3, H, W] - ground truth reference video (LR or HD)
+        generated_frames: [B, M, 3, H, W] - generated video, M is the number of frames
+        gt_frames:        [B, M, 3, H, W] - ground truth reference video (LR or HD)
         """
-        B, T, C, H, W = generated_frames.shape
+        B, M, C, H, W = generated_frames.shape
 
         # 帧数不足 2 无法计算光流
-        if T <= 1:
+        if M <= 1:
             return torch.tensor(0.0, device=self.device, dtype=self.data_type)
 
         L_temp = 0.0
@@ -111,7 +125,7 @@ class FewShotVideoSRTrainer:
         generated_frames = generated_frames.to(torch.float32)
         gt_frames = gt_frames.to(torch.float32)
         for b in range(B):
-            for i in range(T - 1):
+            for i in range(M - 1):
                 gen1 = generated_frames[b, i].unsqueeze(0)
                 gen2 = generated_frames[b, i + 1].unsqueeze(0)
                 gt1 = gt_frames[b, i].unsqueeze(0)
@@ -144,21 +158,21 @@ class FewShotVideoSRTrainer:
         return pe
 
 
-    def get_hd_embeddings(self, hd_frames, sparse_indices):
-        """
-        hd_frames: tensor (B, N, 3, H, W) HD视频帧
-        sparse_indices: tensor (B, N) 对应帧索引（顺序对应 hd_frames）
-        Returns: tensor (B, N, embed_dim)
-        """
-        B, N, C, H, W = hd_frames.shape
-        # 展平 batch 和时间维度，送入 CLIP image encoder
-        frames_flat = hd_frames.reshape(B * N, C, H, W) # [BN, 3, H, W]
-        # 提取图像特征
-        embeds = self.pipe._encode_image(frames_flat, self.device, 1, False) # [BN embed_dim]
-        embeds = embeds.view(B, N, -1) # [B, N, embed_dim]
-        # 生成位置编码
-        pe = self.positional_encoding(sparse_indices, max_pos=self.num_frames, d_model=self.embed_dim) # [B, N, embed_dim]
-        return embeds + pe
+    # def get_hd_embeddings(self, hd_frames, sparse_indices):
+    #     """
+    #     hd_frames: tensor (B, N, 3, H, W) HD视频帧
+    #     sparse_indices: tensor (B, N) 对应帧索引（顺序对应 hd_frames）
+    #     Returns: tensor (B, N, embed_dim)
+    #     """
+    #     B, N, C, H, W = hd_frames.shape
+    #     # 展平 batch 和时间维度，送入 CLIP image encoder
+    #     frames_flat = hd_frames.reshape(B * N, C, H, W) # [BN, 3, H, W]
+    #     # 提取图像特征
+    #     embeds = self.pipe._encode_image(frames_flat, self.device, 1, False) # [BN embed_dim]
+    #     embeds = embeds.view(B, N, -1) # [B, N, embed_dim]
+    #     # 生成位置编码
+    #     pe = self.positional_encoding(sparse_indices, max_pos=self.num_frames, d_model=self.embed_dim) # [B, N, embed_dim]
+    #     return embeds + pe
 
     @torch.no_grad()
     def _encode_frames_clip(self, frames):
@@ -182,9 +196,13 @@ class FewShotVideoSRTrainer:
         embeds = self.pipe._encode_image(flat, self.device, 1, False).reshape(B, T, -1)
         return embeds
 
-    def build_image_embeddings(self, lr_frames, hd_frames=None, sparse_indices=None,
-                               use_adaptive_gate=False, spread_radius=0):
+    def build_image_embeddings(self, lr_frames, hd_frames=None, indices_mask=None,
+                               spread_radius=0):
         """
+        inputs:
+            lr_frames: [B, T, 3, H, W]
+            hd_frames: [B, N, 3, H, W]
+            indices_mask: [B, N]
         Returns:
           tokens: [B, T, cross_attn_dim]
           attn_mask: [B, T] (HD位置=1 其余=0; 若 UNet 支持可传, 否则可忽略)
@@ -192,145 +210,233 @@ class FewShotVideoSRTrainer:
           - Handles N=0/1/2 seamlessly
           - spread_radius: Spread HD influence to nearby r frames (0/1/2)
         """
+
         B, T, C, H, W = lr_frames.shape
-        assert T <= self.T_max
         device = lr_frames.device
 
-        # 1) LR full sequence base
-        lr_tok = self._encode_frames_clip(lr_frames)  # [B, T, D]
-        base_dtype = lr_tok.dtype
-        tokens = lr_tok.clone()
-        attn_mask = torch.zeros(B, T, device=device)
+        # 1) LR 全序列编码
+        lr_token = self._encode_frames_clip(lr_frames)  # [B, T, D]
+        base_dtype = lr_token.dtype
+        D = lr_token.size(-1)
 
-        has_hd = (hd_frames is not None) and (sparse_indices is not None) and (sparse_indices.numel() > 0)
-        if has_hd:
-            B2, N, C2, _, _ = hd_frames.shape
-            assert B2 == B and C2 == 3 and N <= T
-            hd_tok = self._encode_frames_clip(hd_frames)  # [B, N, D]
-            hd_tok = hd_tok.to(base_dtype)  # Ensure same dtype as lr_tok
+        tokens = lr_token.clone()
+        attn_mask = torch.zeros(B, T, device=device, dtype=torch.float32)
 
-            idx = sparse_indices.long()  # [B, N]
-            D = lr_tok.size(-1)
-            idx_exp = idx.unsqueeze(-1).expand(B, N, D)
-            lr_at_idx = lr_tok.gather(1, idx_exp)  # [B, N, D]
-            lr_at_idx = lr_at_idx.to(base_dtype)  # Ensure same dtype
-
-            # Gated fusion
-            if use_adaptive_gate:
-                feat = torch.cat([lr_at_idx, hd_tok, (hd_tok - lr_at_idx).abs()], dim=-1)  # [B, N, 3D]
-                g = torch.sigmoid(self.g_mlp(feat))  # [B, N, 1]
-            else:
-                g = torch.sigmoid(self.hd_gate).view(1, 1, 1)  # Scalar [1,1,1]
-
-            g = g.to(base_dtype)  # Ensure same dtype
-            fused = g * hd_tok + (1 - g) * lr_at_idx  # [B, N, D]
-            tokens.scatter_(1, idx_exp, fused)  # Write back
-            attn_mask.scatter_(1, idx, torch.ones_like(idx, dtype=attn_mask.dtype))
+        # 2) 若没有 HD 或 mask 全 False，直接返回 LR
+        has_hd = (
+            hd_frames is not None and
+            indices_mask is not None and
+            indices_mask.numel() > 0 and
+            indices_mask.to(torch.bool).any().item()
+        )
+        if not has_hd:
+            # 位置/来源嵌入 & dtype 统一
+            pos_ids = torch.arange(T, device=device)[None, :].expand(B, T)
+            tokens = tokens + 0.1 * self.pos_abs(pos_ids)
+            src_ids = (attn_mask > 0).long()  # 全 0
+            tokens = tokens + self.src_type(src_ids)
+            tokens = tokens.to(self.pipe.unet.dtype)
+            return tokens, attn_mask
 
 
-            # Optional: Neighborhood spread with accumulated weights
-            if spread_radius > 0:
-                # Loop over batch and HD positions to handle spreads individually
-                # Note: This handles overlaps by sequential updates; for small N/r, accumulation is minimal.
-                # If overlaps are frequent, consider collecting all contributions and averaging (more complex).
-                for i in range(B):
-                    for j in range(N):
-                        center = idx[i, j].item()
-                        center_fused = fused[i+1, j:j+1]  # [1, D] (keep dim for scatter)
-                        for offset in range(1, spread_radius + 1):
-                            w = 1.0 / (offset + 1)  # Decaying weight
-                            for dir in (-1, 1):
-                                nb_pos = center + dir * offset
-                                if 0 <= nb_pos < T:
-                                    nb_idx = torch.full((1, 1, tokens.size(-1)), nb_pos, device=device, dtype=torch.long)           # [1,1,D]
-                                    orig_nb = tokens[i:i+1].gather(1, nb_idx)  # [1, 1, D]
-                                    updated_nb = w * center_fused + (1 - w) * orig_nb  # [1, 1, D]
-                                    tokens[i:i+1].scatter_(1, nb_idx, updated_nb)
-                                    # Gradual mask: decay from 1.0 at center
-                                    attn_mask[i, nb_pos] = torch.maximum(attn_mask[i, nb_pos], torch.tensor(0.5/offset, device=device))
+        # 3) 标准化 fixed_indices -> [B, N]
 
+        indices =  self.fixed_indices.view(1, self.N).expand(B, -1)  # [B,N]    
+        N = indices.size(1)
 
-        # 2) Add positional + source type embeddings
+        # 4) 取 LR/HD 在候选位置的 token
+        ind_exp = indices.unsqueeze(-1).expand(B, N, D)                         # [B,N,D]
+        lr_token_at_ind = lr_token.gather(1, ind_exp).to(base_dtype)        # [B,N,D]
+        hd_token = self._encode_frames_clip(hd_frames).to(base_dtype)       # [B,N,D]
+
+        # 5) 掩码选择：显式成对索引，避免跨样本混合
+        mask = indices_mask.bool().to(device)
+        b_idx, s_idx = mask.nonzero(as_tuple=True)      # [M], [M]
+        true_ind = indices[b_idx, s_idx]                       # [M], 一个batch中, 所有被选中的hd frame 的序号
+        lr_sel = lr_token_at_ind[b_idx, s_idx, :]       # [M, D], 一个batch中, 所有被选中的hd frame 同样位置的 lr frame的特征
+        hd_sel = hd_token[b_idx, s_idx, :]              # [M, D], 一个batch中, 所有被选中的hd frame 的特征
+
+        # 6) 门控融合（标量门；需要向量门时可替换）
+        if self.use_adaptive_gate:
+            feat = torch.cat([lr_sel, hd_sel, (hd_sel - lr_sel).abs()], dim=-1)  # [M, 3D]
+            g = torch.sigmoid(self.g_mlp(feat))                                  # [M,1] 或 [M,D]
+        else:
+            g = torch.sigmoid(self.hd_gate).view(1, 1).expand(hd_sel.size(0), 1) # [M,1]
+
+        g = g.to(base_dtype)
+        fused_sel = g * hd_sel + (1.0 - g) * lr_sel                               # [M, D]
+
+        # 7) 写回中心位置（逐样本逐时刻，一一对应）
+        tokens[b_idx, true_ind, :] = fused_sel
+        attn_mask[b_idx, true_ind] = 1.0
+
+        # 8) 邻域扩散 —— 按 batch 循环、逐个 video 处理（不跨样本）
+        if spread_radius > 0:
+            # 先把“中心写回后的 tokens”做快照，只用于读取原邻居，避免写后读
+            tokens_base = tokens.clone()
+
+            # 为了每个样本独立扩散：逐样本处理
+            for i in range(B):
+                # 取该样本的所有中心（b==i）
+                sel_i = (b_idx == i)
+                if not sel_i.any():
+                    continue
+
+                centers_i = true_ind[sel_i]          # [Mi]
+                fused_i   = fused_sel[sel_i, :]   # [Mi, D]
+
+                # 该样本的累加器/计数器，仅作用于第 i 个样本
+                accum_i = torch.zeros((T, D), device=device, dtype=tokens.dtype)   # [T,D]
+                count_i = torch.zeros((T, 1), device=device, dtype=tokens.dtype)   # [T,1]
+
+                # 遍历 offset，对称扩散
+                for offset in range(1, spread_radius + 1):
+                    w = 1.0 / (offset + 1)
+
+                    for dir in (-1, 1):
+                        nb_pos = centers_i + dir * offset           # [Mi]
+                        valid = (nb_pos >= 0) & (nb_pos < T)
+                        if not valid.any():
+                            continue
+
+                        t_valid = nb_pos[valid]                     # [m]
+                        f_valid = fused_i[valid, :]                 # [m,D]
+
+                        # 从该样本的 tokens_base 读取原邻居 → 融合
+                        orig_nb = tokens_base[i, t_valid, :]        # [m,D]
+                        upd = w * f_valid + (1.0 - w) * orig_nb     # [m,D]
+
+                        # 累加 + 计数（在样本 i 的局部累加器上）
+                        # 用 scatter_add_ 按行聚合（可能同一 t 被多个中心命中）
+                        accum_i.index_add_(0, t_valid, upd)
+                        count_i.index_add_(0, t_valid, torch.ones((t_valid.size(0), 1),
+                                                                device=device, dtype=tokens.dtype))
+
+                        # 邻域 mask（样本 i 局部）：取最大
+                        attn_mask[i, t_valid] = torch.maximum(
+                            attn_mask[i, t_valid],
+                            torch.full((t_valid.size(0),), 0.5 / offset, device=device, dtype=attn_mask.dtype)
+                        )
+
+                # 把该样本的邻域平均写回（只改写被命中的位置）
+                hit_i = (count_i.squeeze(-1) > 0)                  # [T]
+                if hit_i.any():
+                    tokens[i, hit_i, :] = accum_i[hit_i, :] / count_i[hit_i, :].clamp_min(1e-8)
+
+        # 9) 位置/来源嵌入 + dtype
         pos_ids = torch.arange(T, device=device)[None, :].expand(B, T)
-        tokens = tokens + 0.1 * self.pos_abs(pos_ids)  # Scaled learnable PE
-        src_ids = (attn_mask > 0).long()  # 0: LR, 1: HD/fused
+        tokens = tokens + 0.1 * self.pos_abs(pos_ids)
+
+        src_ids = (attn_mask > 0).long()
         tokens = tokens + self.src_type(src_ids)
 
-        # 3) Project to cross-attn dim and LN
-        # tokens = self.cond_ln(self.cross_proj(tokens))  # [B, T, embed_dim]
         tokens = tokens.to(self.pipe.unet.dtype)
 
         return tokens, attn_mask
 
-    def get_frame_latents(self, frames_tensor: torch.Tensor):
+    def get_frame_latents(self, frames_tensor: torch.Tensor, mask: torch.Tensor | None = None):
         """
-        Encode video frames to latents using _encode_vae_image, handling multi-frame.
-        frames_tensor: [B, T, 3, H, W]
-        Returns: [B, T, C_latent,h, w]
+        Encode video frames to latents with optional masking.
+        frames_tensor: [B, T or N, 3, H, W]
+        mask: [B, T or N] bool, True means "encode this frame"; if None, treat as all True.
+        Returns: [B, T or N, C_latent, h, w]  (unselected positions are zero-filled)
         """
-        B, T, C, H, W = frames_tensor.shape
-        ## If no frames, return an empty latent tensor with correct shape/dtype/device
-        if T == 0 or frames_tensor.numel() == 0:
-            vae = self.pipe.vae
-            vae_sf = getattr(self.pipe, "vae_scale_factor", 8)  # diffusers provides this; fallback=8
-            latent_ch = getattr(vae.config, "latent_channels", 4)  # SD/SVD usually 4
-            h, w = H // vae_sf, W // vae_sf
-            return torch.empty(B, 0, latent_ch, h, w, device=self.device, dtype=vae.dtype)
+        assert frames_tensor.dim() == 5, f"Expected [B,TN,3,H,W], got {tuple(frames_tensor.shape)}"
+        B, TN, C, H, W = frames_tensor.shape
+        device = frames_tensor.device
+        vae = self.pipe.vae
+        vae_sf = getattr(self.pipe, "vae_scale_factor", 8)
+        latent_ch = getattr(vae.config, "latent_channels", 4)
+        h, w = H // vae_sf, W // vae_sf
 
+        # mask 缺省 = 全 True
+        if mask is None:
+            mask = torch.ones(B, TN, dtype=torch.bool, device=device)
+        else:
+            assert mask.shape == (B, TN), f"mask must be [B,T], got {tuple(mask.shape)}"
+            mask = mask.to(torch.bool).to(device)
 
-        frames_flat = frames_tensor.reshape(B * T, C, H, W)  # [B*T, 3, H, W]
+        # 预分配输出（零占位，避免对未选中的帧做编码）
+        latents_out = torch.zeros(B * TN, latent_ch, h, w, device=self.device, dtype=vae.dtype)
 
-        ## convert the frame_tensor to the required data format
-        frames_flat = frames_flat.to(self.pipe.vae.dtype)  # Ensure dtype matches VAE
+        # 选中项的扁平索引
+        if mask.any():
+            # 展平成 [B*T]，取被选中的全局下标
+            flat_mask = mask.reshape(-1)
+            flat_idx = torch.nonzero(flat_mask, as_tuple=False).squeeze(1)  # [M]
+            # 取被选中的帧并编码
+            frames_flat = frames_tensor.reshape(B * TN, C, H, W).to(vae.dtype)
+            selected = frames_flat.index_select(0, flat_idx)  # [M, 3, H, W]
 
-        latents = []
-        with torch.no_grad():
-            chunk_size = self.chunk_size  # 调整以防OOM，小于T即可
-            for i in range(0, B * T, chunk_size):
-                chunk = frames_flat[i:i + chunk_size]
-                # 调用管道的_encode_vae_image，设置指导为False，num=1
-                latent_chunk = self.pipe._encode_vae_image(
-                    chunk,
-                    device=self.device,
-                    num_videos_per_prompt=1,
-                    do_classifier_free_guidance=False
-                )  # [chunk_size, C_latent, h, w]
-                latents.append(latent_chunk)
-        
-        latents = torch.cat(latents, dim=0)  # [B*T, C_latent, h, w]
-        latents = latents.reshape(B, T, *latents.shape[1:])  # [B, T, C_latent, h, w]
+            latents_sel = []
+            with torch.no_grad():
+                chunk_size = max(int(getattr(self, "chunk_size", 8)), 1)
+                for i in range(0, selected.size(0), chunk_size):
+                    chunk = selected[i:i + chunk_size]
+                    latent_chunk = self.pipe._encode_vae_image(
+                        chunk,
+                        device=self.device,
+                        num_videos_per_prompt=1,
+                        do_classifier_free_guidance=self.do_classifier_free_guidance,
+                    )  # [m, C_latent, h, w]
+                    latents_sel.append(latent_chunk)
 
-        # SVD latent通常需乘scaling factor（从VAE config获取）
-        latents = latents * self.pipe.vae.config.scaling_factor
-        
+            if len(latents_sel):
+                latents_sel = torch.cat(latents_sel, dim=0)
+                latents_out[flat_idx] = latents_sel
+
+        # 还原形状并做 scaling factor
+        latents = latents_out.reshape(B, TN, latent_ch, h, w)
+        # latents = latents * vae.config.scaling_factor
         return latents
+
     
-    def compute_loss(self, lr_frames, hd_frames, sparse_indices):
+    def compute_loss(self, lr_frames, hd_frames, indices_mask):
         '''
         Compute the loss for a batch of LR and HD frames.
-        
-        lr_frames: tensor (B, T, 3, H, W)
-        hd_frames: tensor (B, N, 3, H, W)
-        sparse_indices: tensor (B, N) (indices of HD frames to use for conditioning), length is N.
+        input:
+            lr_frames: tensor (B, T, 3, H, W)
+            hd_frames: tensor (B, N, 3, H, W)
+            indices_mask: tensor (B, N) ( used to specify which HD frames are active)
+            # sparse_indices: tensor (B, N) (indices of HD frames to use for conditioning), length is N.
         
         '''
+        B, N, C_video, H_video, W_video = hd_frames.shape
+        assert N == self.N, f"Expected N={self.N}, got {N}"
+
+        sparse_indices = self.fixed_indices.view(1, self.N).expand(B, -1)  # [B,N]
+
         lr_frames = lr_frames.to(self.device, dtype=self.data_type)
         hd_frames = hd_frames.to(self.device, dtype=self.data_type)
+        
+        indices_mask = indices_mask.to(self.device, dtype=torch.bool)
 
         # Get LR conditioning latents (separate)
         cond_lr_latents = self.get_frame_latents(lr_frames)
+        B, T, C_latent, H_latent, W_latent = cond_lr_latents.shape
 
-        hr_latents = self.get_frame_latents(hd_frames)  # 
-        B, N, C_latent, H, W = hr_latents.shape
 
-        B, T, C_latent, H, W = cond_lr_latents.shape
+        cond_hd_latents = self.get_frame_latents(hd_frames, indices_mask)  # [B, N, C_latent, H_latent, W_latent]
 
-        full_hr_latents = cond_lr_latents.clone()  # Start with LR everywhere
+        # 把 N 个槽位的 HR latents “散射”到时间轴 [B,T,...]
+        latent_ind_over_T = sparse_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(B, self.N, C_latent, H_latent, W_latent)
+        hd_latent_over_T = torch.zeros(B, T, C_latent, H_latent, W_latent, device=lr_frames.device, dtype=self.data_type)        
+        hd_latent_over_T.scatter_(1, latent_ind_over_T, cond_hd_latents)  # 未启用的槽位本身是全零
 
-        indices = sparse_indices.unsqueeze(2).unsqueeze(-1).unsqueeze(-1).expand(B, N, C_latent, H, W).long()
-        video_indices = sparse_indices.unsqueeze(2).unsqueeze(-1).unsqueeze(-1).expand(B, N, 3, hd_frames.shape[3], hd_frames.shape[4]).long()
 
-        full_hr_latents.scatter_(dim=1, index=indices, src=hr_latents)  # Place HR at sparse indices
+        # 按 mask 构造时间权重图 w: [B,T,1,1,1]
+        w = torch.zeros(B, T, 1, 1, 1, device=cond_hd_latents.device, dtype=cond_hd_latents.dtype)
+        w.scatter_(
+            1,
+            sparse_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1),
+            indices_mask.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(cond_hd_latents.dtype),
+        )
+
+
+
+        # 最终融合：只在 mask=True 的固定索引处，用 HR 覆盖 LR
+        full_cond_latents = w * hd_latent_over_T + (1.0 - w) * cond_lr_latents  # [B,T,C_latent, H_latent, W_latent]
+
 
         ## 1) Sample timestep
         t = torch.randint(0, self.pipe.scheduler.config.num_train_timesteps, (B,), dtype=torch.long).to(self.device)
@@ -338,8 +444,8 @@ class FewShotVideoSRTrainer:
         added_time_ids = self.get_added_time_ids(batch_size=B)
 
         ### 2) add noise
-        gt_noise = torch.randn_like(full_hr_latents, device=self.device, dtype=self.data_type)  # [B, T, C_latent, H, W]
-        z_t = self.pipe.scheduler.add_noise(full_hr_latents, gt_noise, t)   ## [B, T, C_latent, H, W]
+        gt_noise = torch.randn_like(full_cond_latents, device=self.device, dtype=self.data_type)  # [B, T, C_latent, H_latent, W_latent]
+        z_t = self.pipe.scheduler.add_noise(full_cond_latents, gt_noise, t)   ## [B, T, C_latent, H_latent, W_latent]
 
         ## 3)
         # Get HD embeddings with pos (separate)
@@ -348,78 +454,138 @@ class FewShotVideoSRTrainer:
         
         ## 4)
         # Prepare UNet input: concat noisy target with LR conditioning
-        latent_model_input = torch.cat([z_t, cond_lr_latents], dim=2)  # [1, T, 2*C, h, w]
+        latent_model_input = torch.cat([z_t, cond_lr_latents], dim=2)  # [1, T, 2*C, H_latent, W_latent]
 
         ## 5) Predict velocity
-        v_pred = self.pipe.unet(
+        vel_pred = self.pipe.unet(
             latent_model_input,
             t,
             encoder_hidden_states=image_embeddings,
             added_time_ids=added_time_ids,
             return_dict=False
-        )[0]   ### v_pred: [B, T, C_latent, h, w], here is [B, 14, 4, 32, 32]
-        # print('type of v_pred:', v_pred.dtype) #float16
-        v_pred = v_pred.to(torch.float32)  # Ensure float32 for precision
+        )[0]   ### vel_pred: [B, T, C_latent, h, w], here is [B, 14, 4, 32, 32]
+        # print('type of vel_pred:', vel_pred.dtype) #float16
+        vel_pred = vel_pred.to(torch.float32)  # Ensure float32 for precision,  # [B,T,C_latent, H_latent, W_latent]
 
         # print('type of self.pipe.scheduler.alphas_cumprod:', self.pipe.scheduler.alphas_cumprod.dtype) #float32
 
-        # 6) v-target（与 v_prediction 对齐）
+
+        # 6) 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
+        #    x0_hat = sqrt(ab)*x_t - sqrt(1-ab)*vel_pred
+        z_t = z_t.to(torch.float32)  # Ensure float32 for precision
+        pred_original = (sqrt_ab * z_t - sqrt_oma * vel_pred).clamp(-1, 1)       # [B,T,C,h,w]
+        pred_original = pred_original.to(self.data_type)
+
+        # Decode to pixel space
+        with torch.no_grad():
+            gen_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, C_video, T, H_video, W_video]
+            gen_video = gen_video.permute(0, 2, 1, 3, 4) ## [B, T, C_video, H_video, W_video]
+            gen_video = gen_video.clamp(-1, 1)
+            gen_video = gen_video.to(self.data_type)
+        # print(f'gen_video shape: {gen_video.shape}')
+
+        
+        
+        # 7) loss calculation
+        # v-target（与 v_prediction 对齐）
         #    先取 \bar{alpha}_t，再构造 v_gt = sqrt(ab)*ε - sqrt(1-ab)*x0
         alpha_bar = self.pipe.scheduler.alphas_cumprod[t]                  # [B]
         # 扩成 [B,1,1,1,1] 便于广播到 [B,T,C,h,w]
         sqrt_ab  = alpha_bar.view(B, 1, 1, 1, 1).sqrt()
         sqrt_oma = (1.0 - alpha_bar).view(B, 1, 1, 1, 1).sqrt()
         gt_noise = gt_noise.to(torch.float32)  # Ensure float32 for precision
-        full_hr_latents = full_hr_latents.to(torch.float32)  # Ensure float32 for precision
-        v_gt = sqrt_ab * gt_noise - sqrt_oma * full_hr_latents                 # [B,T,C,h,w]
+        full_cond_latents = full_cond_latents.to(torch.float32)  # Ensure float32 for precision
+        vel_gt = sqrt_ab * gt_noise - sqrt_oma * full_cond_latents                 # [B,T,C_latent, H_latent, W_latent]
         # print('type of v_gt:', v_gt.dtype) #float32
 
-        # （只对选帧算 loss：先在 v_pred/v_gt 上做 gather 再 MSE）
-        pre_v_selected = v_pred.gather(1, indices)  # [B, N, C_latent, H, W]
-        gt_v_selected  = v_gt.gather(1,  indices)
-        pre_v_selected = pre_v_selected.to(self.data_type)  # Ensure same dtype as UNet
-        gt_v_selected = gt_v_selected.to(self.data_type)  # Ensure same dtype as
-        L_denoise = nn.MSELoss()(pre_v_selected, gt_v_selected).to(self.data_type)  # [B, N, C_latent, H, W] -> scalar
+        ##（只对选帧算 loss：先在 v_pred/v_gt 上做 gather 再 MSE）
+        pre_vel_sel = vel_pred.gather(1, latent_ind_over_T)  # [B, N, C_latent, H_latent, W_latent]
+        gt_vel_sel  = vel_gt.gather(1,  latent_ind_over_T)
+        
+        ## 只对 mask=True 的槽位算损失
+        ## indices_mask   # [B, N] bool
+        if indices_mask.any().item():
+            # 为数值稳定，建议用 float32 算 loss，再把标量转回 self.data_type
+            pre_flat = pre_vel_sel[indices_mask].to(torch.float32)   # [M, C, H_latent, W_latent]
+            gt_flat  = gt_vel_sel[indices_mask].to(torch.float32)    # [M, C, H_latent, W_latent]
+            L_denoise = F.mse_loss(pre_flat, gt_flat, reduction='mean') \
+                            .to(self.data_type)
+        else:
+            L_denoise = torch.tensor(0.0, device=self.device, dtype=self.data_type)
 
-        # 7) 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
-        #    x0_hat = sqrt(ab)*x_t - sqrt(1-ab)*v_pred
-        z_t = z_t.to(torch.float32)  # Ensure float32 for precision
-        pred_original = (sqrt_ab * z_t - sqrt_oma * v_pred).clamp(-1, 1)       # [B,T,C,h,w]
-        pred_original = pred_original.to(self.data_type)
 
-        # Decode to pixel space
-        with torch.no_grad():
-            generated_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, C, T, H, W]
-            generated_video = generated_video.permute(0, 2, 1, 3, 4) ## [B, T, C, H, W]
-            generated_video = generated_video.clamp(-1, 1)
-            generated_video = generated_video.to(self.data_type)
-        # print(f'generated_video shape: {generated_video.shape}')
 
-        generated_video_selected = generated_video.gather(1, video_indices) # [B, N, C, H, W]
         # print(f'generated_video_selected shape: {generated_video_selected.shape}')
         # print(f'hd_frames shape: {hd_frames.shape}')
 
-        # Fidelity loss (L1 on full video)
-        L_fid = nn.L1Loss()(generated_video_selected, hd_frames)  # Adjust dims if needed
-        L_fid = L_fid.to(self.data_type)
+        video_ind_over_T = sparse_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(B, self.N, C_video, H_video, W_video)
+        gen_hd_video_sel = gen_video.gather(1, video_ind_over_T) # [B, N, C, H, W]
+        
+        if indices_mask.any().item():
+            # 为数值稳定，用 float32 算 loss，再把标量转回 self.data_type
+            gen_hd_video_flat = gen_hd_video_sel[indices_mask].to(torch.float32)   # [M, C, H_video, W_video]
+            gt_hd_video_flat  = hd_frames[indices_mask].to(torch.float32)    # [M, C, H_video, W_video]
+            L_fid = F.mse_loss(gen_hd_video_flat, gt_hd_video_flat, reduction='mean') \
+                            .to(self.data_type)
 
-        # Perceptual loss (average over frames)
-
-        L_perc = torch.tensor(0.0, device=self.device, dtype=self.data_type)  # Initialize
-        N = hd_frames.shape[1]
-        if N > 0:
+            # Perceptual loss (average over frames)
+            M = gen_hd_video_flat.shape[0]
             with torch.no_grad():
-                for i in range(N):
-                    L_perc += self.lpips(generated_video_selected[:, i, :, :, :], hd_frames[:, i, :, :, :]).to(self.data_type)
-            L_perc /= N
+                for i in range(M):
+                    L_perc += self.lpips(gen_hd_video_flat[i, :, :, :], gt_hd_video_flat[i, :, :, :]).to(self.data_type)
+                L_perc /= M
+            
+            
+        else:
+            L_fid = torch.tensor(0.0, device=self.device, dtype=self.data_type)
+            L_perc = torch.tensor(0.0, device=self.device, dtype=self.data_type)  
+
+
+        ### hd frames temporal loss
+        ## 归一化到 [0,1]，先不展平，保留 [B, N, C, H, W]，后面按 video 切片
+        gen_hd_sel_norm = (gen_hd_video_sel.clamp(-1, 1) + 1) / 2
+        gt_hd_norm  = (hd_frames.clamp(-1, 1) + 1) / 2
+
+        # 转到更稳定的 dtype 做 loss
+        gen_hd_sel_norm = gen_hd_sel_norm.to(torch.float32)
+        gt_hd_norm  = gt_hd_norm.to(torch.float32)
+
+        L_hd_temp = torch.zeros((), device=self.device, dtype=torch.float32)
+        vid_count = 0
+
+        for b in range(gen_hd_sel_norm.shape[0]):  # 遍历每个 video
+            valid_idx = indices_mask[b].nonzero(as_tuple=True)[0]  # 该 video 内有效的 slot 索引
+            if valid_idx.numel() < 2:
+                continue  # 少于两帧，跳过时序损失
+
+            # 取出该 video 的有效帧序列，shape: [K, C, H, W]，K>=2
+            pred_seq = gen_hd_sel_norm[b, valid_idx, ...]  # [K, C, H, W]
+            gt_seq   = gt_hd_norm[b,  valid_idx, ...]  # [K, C, H, W]
+
+            # 给 compute_temporal_loss 一个 batch 维度：[1, K, C, H, W]
+            pred_seq = pred_seq.unsqueeze(0)
+            gt_seq   = gt_seq.unsqueeze(0)
+
+            # 累加该 video 的时序损失（标量）
+            L_hd_temp = L_hd_temp + self.compute_temporal_loss(pred_seq, gt_seq)
+            vid_count += 1
+
+        # 对参与的 video 取平均；若没有任何 video 满足条件，则置 0
+        if vid_count > 0:
+            L_hd_temp = (L_hd_temp / vid_count).to(self.data_type)
+        else:
+            L_hd_temp = torch.zeros((), device=self.device, dtype=self.data_type)
+        
+
+            
+            
 
         # Temporal loss (normalize frames to [0,1] for RAFT)
-        gen_norm = (generated_video.clamp(-1, 1) + 1) / 2
+        
         lr_norm = (lr_frames.clamp(-1, 1) + 1) / 2
-        hd_selected_norm = (generated_video_selected.clamp(-1, 1) + 1) / 2
-        hd_norm = (hd_frames.clamp(-1, 1) + 1) / 2
+        gen_norm = (gen_video.clamp(-1, 1) + 1) / 2        
         L_lr_temp = self.compute_temporal_loss(gen_norm, lr_norm)
-        L_hd_temp = self.compute_temporal_loss(hd_selected_norm, hd_norm)
+
 
         # print('type of L_denoise:', L_denoise.dtype)
         # print('type of L_fid:', L_fid.dtype)

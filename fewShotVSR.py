@@ -280,7 +280,7 @@ class FewShotVideoSRTrainer:
         # 6) 门控融合（标量门；需要向量门时可替换）
         if self.use_adaptive_gate:
             feat = torch.cat([lr_sel, hd_sel, (hd_sel - lr_sel).abs()], dim=-1)  # [M, 3D]
-            print('Adaptive gate features:', feat.shape)
+            # print('Adaptive gate features:', feat.shape)
             g = torch.sigmoid(self.g_mlp(feat))                                  # [M,1] 或 [M,D]
         else:
             g = torch.sigmoid(self.hd_gate).view(1, 1).expand(hd_sel.size(0), 1) # [M,1]
@@ -630,7 +630,7 @@ class FewShotVideoSRTrainer:
                 with torch.autocast(self.device, dtype=torch.float16):
                     # Assume batch = (lr_frames, hd_frames, sparse_indices)
                     lr_frames, hd_frames, mask = batch
-                    print(f'Batch {i+1}: lr_frames {lr_frames.shape}, hd_frames {hd_frames.shape}, mask {mask.shape}')
+                    # print(f'Batch {i+1}: lr_frames {lr_frames.shape}, hd_frames {hd_frames.shape}, mask {mask.shape}')
                     # print('mask', mask)
                     loss = self.compute_loss(lr_frames, hd_frames, mask)
                     # print('type of loss:', loss.dtype)

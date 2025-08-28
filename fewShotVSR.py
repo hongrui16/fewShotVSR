@@ -537,14 +537,15 @@ class FewShotVideoSRTrainer:
 
             # Perceptual loss (average over frames)
             M = gen_hd_video_flat.shape[0]
-            L_perc = 0
+            # L_perc = 0
             with torch.no_grad():
-                for i in range(M):
-                    temp_gen_hd_video_flat = gen_hd_video_flat[i, :, :, :]
-                    temp_gt_hd_video_flat = gt_hd_video_flat[i, :, :, :]
-                    print(f'temp_gen_hd_video_flat, min: {temp_gen_hd_video_flat.min()}, max: {temp_gen_hd_video_flat.max()}')
-                    print(f'temp_gt_hd_video_flat, min: {temp_gt_hd_video_flat.min()}, max: {temp_gt_hd_video_flat.max()}')
-                    L_perc += self.lpips(temp_gen_hd_video_flat, temp_gt_hd_video_flat).to(self.data_type)
+                # for i in range(M):
+                #     temp_gen_hd_video_flat = gen_hd_video_flat[i, :, :, :]
+                #     temp_gt_hd_video_flat = gt_hd_video_flat[i, :, :, :]
+                #     print(f'temp_gen_hd_video_flat, min: {temp_gen_hd_video_flat.min()}, max: {temp_gen_hd_video_flat.max()}')
+                #     print(f'temp_gt_hd_video_flat, min: {temp_gt_hd_video_flat.min()}, max: {temp_gt_hd_video_flat.max()}')
+                #     L_perc += self.lpips(temp_gen_hd_video_flat, temp_gt_hd_video_flat).to(self.data_type)
+                L_perc = self.lpips(gen_hd_video_flat, gt_hd_video_flat).to(self.data_type)
                 L_perc /= M
             
             

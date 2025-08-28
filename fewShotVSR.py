@@ -28,7 +28,10 @@ class FewShotVideoSRTrainer:
 
         print(self.pipe.scheduler.config.prediction_type)  # "v_prediction"
 
-        self.do_classifier_free_guidance = self.pipe.do_classifier_free_guidance
+        if not hasattr(self.pipe, "do_classifier_free_guidance"):
+            self.do_classifier_free_guidance = False
+        else:
+            self.do_classifier_free_guidance = self.pipe.do_classifier_free_guidance
         print('self.do_classifier_free_guidance', self.do_classifier_free_guidance)
 
         self.use_adaptive_gate = True

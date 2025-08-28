@@ -55,7 +55,8 @@ class FewShotVideoSRTrainer:
         self.T_max = self.num_frames  # 14
 
         mid = (self.T_max - 1) // 2
-        self.register_buffer("fixed_indices", torch.tensor([0, mid], dtype=torch.long))
+        self.fixed_indices = torch.tensor([0, mid], dtype=torch.long, device=self.device)
+
         self.N = 2  # 槽位数（few-shot 数）
 
 

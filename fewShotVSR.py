@@ -61,11 +61,6 @@ class FewShotVideoSRTrainer:
         self.N = 2  # 槽位数（few-shot 数）
 
 
-        # Freeze VAE
-        for param in self.pipe.vae.parameters():
-            param.requires_grad = False
-        print("VAE frozen.")
-
         # Apply LoRA to U-Net
         lora_config = LoraConfig(
             r=8,
@@ -93,6 +88,14 @@ class FewShotVideoSRTrainer:
         # Scheduler
         self.pipe.scheduler = DPMSolverMultistepScheduler.from_config(self.pipe.scheduler.config)
         self.pipe.scheduler.alphas_cumprod = self.pipe.scheduler.alphas_cumprod.to(self.device)
+
+
+        self.pipe.vae.eval().requires_grad_(False)      # 不更新 VAE 权重，但允许梯度对输入生效
+        self.lpips.eval().requires_grad_(False)         # 不更新 LPIPS 权重，但允许对输入回传
+        for p in self.raft.parameters():                # RAFT 同理：参数不更新，但允许对输入回传
+            p.requires_grad = False
+        self.raft.eval()
+
     
 
     def get_added_time_ids(self, batch_size=1):
@@ -504,11 +507,10 @@ class FewShotVideoSRTrainer:
         pred_original = pred_original.to(self.data_type)
 
         # Decode to pixel space
-        with torch.no_grad():
-            gen_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, C_video, T, H_video, W_video]
-            gen_video = gen_video.permute(0, 2, 1, 3, 4) ## [B, T, C_video, H_video, W_video]
-            gen_video = gen_video.clamp(-1, 1)
-            gen_video = gen_video.to(self.data_type)
+        gen_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, C_video, T, H_video, W_video]
+        gen_video = gen_video.permute(0, 2, 1, 3, 4) ## [B, T, C_video, H_video, W_video]
+        gen_video = gen_video.clamp(-1, 1)
+        gen_video = gen_video.to(self.data_type)
         # print(f'gen_video shape: {gen_video.shape}')
 
         
@@ -554,10 +556,10 @@ class FewShotVideoSRTrainer:
             # Perceptual loss (average over frames)
             M = gen_hd_video_flat.shape[0]
             # L_perc = 0
-            with torch.no_grad():
-                L_perc = self.lpips(gen_hd_video_flat, gt_hd_video_flat).to(self.data_type)
-                L_perc /= M
-            
+        
+            L_perc = self.lpips(gen_hd_video_flat, gt_hd_video_flat).to(self.data_type)
+            L_perc /= M
+        
             
         else:
             L_fid = torch.tensor(0.0, device=self.device, dtype=self.data_type)
@@ -599,9 +601,6 @@ class FewShotVideoSRTrainer:
         else:
             L_hd_temp = torch.zeros((), device=self.device, dtype=self.data_type)
         
-
-            
-            
 
         # Temporal loss (normalize frames to [0,1] for RAFT)
         

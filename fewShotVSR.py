@@ -476,7 +476,12 @@ class FewShotVideoSRTrainer:
         # print('type of self.pipe.scheduler.alphas_cumprod:', self.pipe.scheduler.alphas_cumprod.dtype) #float32
 
 
-        # 6) 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
+        # 6) 
+        alpha_bar = self.pipe.scheduler.alphas_cumprod[t]                  # [B]
+        # 扩成 [B,1,1,1,1] 便于广播到 [B,T,C,h,w]
+        sqrt_ab  = alpha_bar.view(B, 1, 1, 1, 1).sqrt()
+        sqrt_oma = (1.0 - alpha_bar).view(B, 1, 1, 1, 1).sqrt()
+        # 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
         #    x0_hat = sqrt(ab)*x_t - sqrt(1-ab)*vel_pred
         z_t = z_t.to(torch.float32)  # Ensure float32 for precision
         pred_original = (sqrt_ab * z_t - sqrt_oma * vel_pred).clamp(-1, 1)       # [B,T,C,h,w]
@@ -493,14 +498,10 @@ class FewShotVideoSRTrainer:
         
         
         # 7) loss calculation
-        # v-target（与 v_prediction 对齐）
-        #    先取 \bar{alpha}_t，再构造 v_gt = sqrt(ab)*ε - sqrt(1-ab)*x0
-        alpha_bar = self.pipe.scheduler.alphas_cumprod[t]                  # [B]
-        # 扩成 [B,1,1,1,1] 便于广播到 [B,T,C,h,w]
-        sqrt_ab  = alpha_bar.view(B, 1, 1, 1, 1).sqrt()
-        sqrt_oma = (1.0 - alpha_bar).view(B, 1, 1, 1, 1).sqrt()
         gt_noise = gt_noise.to(torch.float32)  # Ensure float32 for precision
         full_cond_latents = full_cond_latents.to(torch.float32)  # Ensure float32 for precision
+        
+        #    先取 \bar{alpha}_t，再构造 v_gt = sqrt(ab)*ε - sqrt(1-ab)*x0
         vel_gt = sqrt_ab * gt_noise - sqrt_oma * full_cond_latents                 # [B,T,C_latent, H_latent, W_latent]
         # print('type of v_gt:', v_gt.dtype) #float32
 

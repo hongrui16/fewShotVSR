@@ -241,7 +241,7 @@ class FewShotVideoSRTrainer:
 
         # 3) 标准化 fixed_indices -> [B, N]
 
-        indices =  self.fixed_indices.view(1, self.N).expand(B, -1)  # [B,N]    
+        indices =  self.fixed_indices.view(1, self.N).expand(B, -1).to(self.device)  # [B,N]    
         N = indices.size(1)
 
         # 4) 取 LR/HD 在候选位置的 token
@@ -404,7 +404,7 @@ class FewShotVideoSRTrainer:
         B, N, C_video, H_video, W_video = hd_frames.shape
         assert N == self.N, f"Expected N={self.N}, got {N}"
 
-        sparse_indices = self.fixed_indices.view(1, self.N).expand(B, -1)  # [B,N]
+        sparse_indices = self.fixed_indices.view(1, self.N).expand(B, -1).to(self.device)  # [B,N]
 
         lr_frames = lr_frames.to(self.device, dtype=self.data_type)
         hd_frames = hd_frames.to(self.device, dtype=self.data_type)

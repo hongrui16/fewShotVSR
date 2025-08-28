@@ -611,6 +611,8 @@ class FewShotVideoSRTrainer:
                 with torch.autocast(self.device, dtype=torch.float16):
                     # Assume batch = (lr_frames, hd_frames, sparse_indices)
                     lr_frames, hd_frames, mask = batch
+                    print(f'Batch {i+1}: lr_frames {lr_frames.shape}, hd_frames {hd_frames.shape}, mask {mask.shape}')
+                    print('mask', mask)
                     loss = self.compute_loss(lr_frames, hd_frames, mask)
                     # print('type of loss:', loss.dtype)
                     loss.backward()

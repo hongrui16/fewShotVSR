@@ -37,11 +37,12 @@ class FewShotVideoSRTrainer:
         self.use_adaptive_gate = True
 
         self.unet_cross_attention_dim = self.pipe.unet.config.cross_attention_dim
+        print('self.unet_cross_attention_dim', self.unet_cross_attention_dim)
         
 
         if self.use_adaptive_gate:
             self.g_mlp = nn.Sequential(
-                nn.Linear(3 * self.embed_dim, 128),  # For adaptive gate: input [LR, HD, |diff|] = 3D
+                nn.Linear(3 * self.unet_cross_attention_dim, 128),  # For adaptive gate: input [LR, HD, |diff|] = 3D
                 nn.ReLU(),
                 nn.Linear(128, 1)  # Output scalar per-frame g
             ).to(self.device)
@@ -263,6 +264,7 @@ class FewShotVideoSRTrainer:
         # 6) 门控融合（标量门；需要向量门时可替换）
         if self.use_adaptive_gate:
             feat = torch.cat([lr_sel, hd_sel, (hd_sel - lr_sel).abs()], dim=-1)  # [M, 3D]
+            print('Adaptive gate features:', feat.shape)
             g = torch.sigmoid(self.g_mlp(feat))                                  # [M,1] 或 [M,D]
         else:
             g = torch.sigmoid(self.hd_gate).view(1, 1).expand(hd_sel.size(0), 1) # [M,1]
@@ -612,7 +614,7 @@ class FewShotVideoSRTrainer:
                     # Assume batch = (lr_frames, hd_frames, sparse_indices)
                     lr_frames, hd_frames, mask = batch
                     print(f'Batch {i+1}: lr_frames {lr_frames.shape}, hd_frames {hd_frames.shape}, mask {mask.shape}')
-                    print('mask', mask)
+                    # print('mask', mask)
                     loss = self.compute_loss(lr_frames, hd_frames, mask)
                     # print('type of loss:', loss.dtype)
                     loss.backward()

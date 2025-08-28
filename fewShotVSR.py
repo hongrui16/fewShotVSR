@@ -537,6 +537,7 @@ class FewShotVideoSRTrainer:
 
             # Perceptual loss (average over frames)
             M = gen_hd_video_flat.shape[0]
+            L_perc = 0
             with torch.no_grad():
                 for i in range(M):
                     L_perc += self.lpips(gen_hd_video_flat[i, :, :, :], gt_hd_video_flat[i, :, :, :]).to(self.data_type)

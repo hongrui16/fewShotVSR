@@ -111,40 +111,56 @@ class FewShotVideoSRTrainer:
         ).to(self.device)
         return added_time_ids
     
-
     def compute_temporal_loss(self, generated_frames, gt_frames):
         """
-        Compute temporal consistency loss based on optical flow.
-        
-        generated_frames: [B, M, 3, H, W] - generated video, M is the number of frames
-        gt_frames:        [B, M, 3, H, W] - ground truth reference video (LR or HD)
+        generated_frames: [B, M, 3, H, W]
+        gt_frames:        [B, M, 3, H, W]
+        返回一个对 generated_frames 可导的标量损失
         """
         B, M, C, H, W = generated_frames.shape
 
-        # 帧数不足 2 无法计算光流
-        if M <= 1:
-            return torch.tensor(0.0, device=self.device, dtype=self.data_type)
+        # 图内零：与计算图相连，避免断图
+        graph_zero = generated_frames.sum() * 0.0
 
-        L_temp = 0.0
-        count = 0
+        # 帧数不足 2 无法计算光流 —— 返回“图内零”
+        if M <= 1:
+            return graph_zero
+
+        # 统一到 fp32 做光流与 MSE
         generated_frames = generated_frames.to(torch.float32)
-        gt_frames = gt_frames.to(torch.float32)
+        gt_frames        = gt_frames.to(torch.float32)
+
+        # 确保 RAFT 处于 eval 状态且不更新参数，但不要包 no_grad（这样对输入仍可导）
+        self.raft.eval()
+        for p in self.raft.parameters():
+            p.requires_grad = False
+
+        L_temp = graph_zero  # 从图内零开始累加，保持可导链
+        pair_count = 0
+
         for b in range(B):
             for i in range(M - 1):
-                gen1 = generated_frames[b, i].unsqueeze(0)
+                gen1 = generated_frames[b, i].unsqueeze(0)     # [1, 3, H, W]
                 gen2 = generated_frames[b, i + 1].unsqueeze(0)
-                gt1 = gt_frames[b, i].unsqueeze(0)
-                gt2 = gt_frames[b, i + 1].unsqueeze(0)
+                gt1  = gt_frames[b, i].unsqueeze(0)
+                gt2  = gt_frames[b, i + 1].unsqueeze(0)
 
+                # 生成光流：可导（不加 no_grad）
+                flow_gen = self.raft(gen1, gen2)[-1]           # [1, 2, H, W]
+
+                # GT 光流：不需要梯度
                 with torch.no_grad():
-                    flow_gen = self.raft(gen1, gen2)[-1]  # [1, 2, H, W]
                     flow_gt = self.raft(gt1, gt2)[-1]
 
-                L_temp += nn.MSELoss()(flow_gen, flow_gt)
-                count += 1
+                L_temp = L_temp + F.mse_loss(flow_gen, flow_gt, reduction="mean")
+                pair_count += 1
 
-        loss =  L_temp / count if count > 0 else torch.tensor(0.0, device=self.device)
-        loss = loss.to(self.data_type)
+        if pair_count > 0:
+            loss = L_temp / pair_count
+        else:
+            loss = graph_zero
+
+        # 建议保持 fp32；如果你整个训练用了 AMP，GradScaler 会处理混精度
         return loss
 
 
@@ -539,12 +555,6 @@ class FewShotVideoSRTrainer:
             M = gen_hd_video_flat.shape[0]
             # L_perc = 0
             with torch.no_grad():
-                # for i in range(M):
-                #     temp_gen_hd_video_flat = gen_hd_video_flat[i, :, :, :]
-                #     temp_gt_hd_video_flat = gt_hd_video_flat[i, :, :, :]
-                #     print(f'temp_gen_hd_video_flat, min: {temp_gen_hd_video_flat.min()}, max: {temp_gen_hd_video_flat.max()}')
-                #     print(f'temp_gt_hd_video_flat, min: {temp_gt_hd_video_flat.min()}, max: {temp_gt_hd_video_flat.max()}')
-                #     L_perc += self.lpips(temp_gen_hd_video_flat, temp_gt_hd_video_flat).to(self.data_type)
                 L_perc = self.lpips(gen_hd_video_flat, gt_hd_video_flat).to(self.data_type)
                 L_perc /= M
             

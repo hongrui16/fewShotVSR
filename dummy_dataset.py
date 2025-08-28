@@ -12,6 +12,7 @@ class DummyFewShotDataset:
                  probs=(0.4, 0.3, 0.3), device="cuda", seed=0):
         self.steps = steps
         self.T, self.H, self.W = T, H, W
+        self.B = 2
         self.device = device
         self.probs = probs
         random.seed(seed)

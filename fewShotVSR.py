@@ -610,8 +610,8 @@ class FewShotVideoSRTrainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 with torch.autocast(self.device, dtype=torch.float16):
                     # Assume batch = (lr_frames, hd_frames, sparse_indices)
-                    lr_frames, hd_frames, sparse_indices = batch
-                    loss = self.compute_loss(lr_frames, hd_frames, sparse_indices)
+                    lr_frames, hd_frames, mask = batch
+                    loss = self.compute_loss(lr_frames, hd_frames, mask)
                     # print('type of loss:', loss.dtype)
                     loss.backward()
                     self.optimizer.step()

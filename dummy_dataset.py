@@ -26,7 +26,6 @@ class DummyFewShotDataset:
         Yields:
         lr_frames:    [B, T, C, H, W], 值域 [-1, 1]
         hd_frames:    [B, 2, C, H, W]  固定两个候选槽位（第0帧 & 中间帧）
-        sparse_indices: [2]            固定时间索引 [0, T//2]
         mask:         [B, 2]           逐样本启用的槽位（0/1/2）
         """
         device = self.device
@@ -59,5 +58,5 @@ class DummyFewShotDataset:
                 if n_b > 0:
                     mask[b, :n_b] = True        # 按顺序启用前 n_b 个槽位
 
-            yield lr_frames, hd_frames, sparse_indices, mask
+            yield lr_frames, hd_frames, mask
 

@@ -77,7 +77,7 @@ class FewShotVideoSRTrainer:
         self.chunk_size = 8
        
         # LPIPS
-        self.lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(self.device)
+        # self.lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(self.device)
 
         # RAFT for temporal loss
         self.raft = raft_small(pretrained=True).eval().to(self.device)
@@ -91,7 +91,7 @@ class FewShotVideoSRTrainer:
 
 
         self.pipe.vae.eval().requires_grad_(False)      # 不更新 VAE 权重，但允许梯度对输入生效
-        self.lpips.eval().requires_grad_(False)         # 不更新 LPIPS 权重，但允许对输入回传
+        # self.lpips.eval().requires_grad_(False)         # 不更新 LPIPS 权重，但允许对输入回传
         for p in self.raft.parameters():                # RAFT 同理：参数不更新，但允许对输入回传
             p.requires_grad = False
         self.raft.eval()
@@ -546,6 +546,7 @@ class FewShotVideoSRTrainer:
         video_ind_over_T = sparse_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(B, self.N, C_video, H_video, W_video)
         gen_hd_video_sel = gen_video.gather(1, video_ind_over_T) # [B, N, C, H, W]
         
+        L_perc = 0
         if indices_mask.any().item():
             # 为数值稳定，用 float32 算 loss，再把标量转回 self.data_type
             gen_hd_video_flat = gen_hd_video_sel[indices_mask].to(torch.float32)   # [M, C, H_video, W_video]
@@ -554,16 +555,15 @@ class FewShotVideoSRTrainer:
                             .to(self.data_type)
 
             # Perceptual loss (average over frames)
-            M = gen_hd_video_flat.shape[0]
-            # L_perc = 0
+            # M = gen_hd_video_flat.shape[0]
         
-            L_perc = self.lpips(gen_hd_video_flat, gt_hd_video_flat).to(self.data_type)
-            L_perc /= M
+            # L_perc = self.lpips(gen_hd_video_flat, gt_hd_video_flat).to(self.data_type)
+            # L_perc /= M
         
             
         else:
             L_fid = torch.tensor(0.0, device=self.device, dtype=self.data_type)
-            L_perc = torch.tensor(0.0, device=self.device, dtype=self.data_type)  
+            # L_perc = torch.tensor(0.0, device=self.device, dtype=self.data_type)  
 
 
         ### hd frames temporal loss

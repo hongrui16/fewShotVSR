@@ -505,7 +505,7 @@ class FewShotVideoSRTrainer:
             return_dict=False
         )[0]   ### vel_pred: [B, T, C_latent, h, w], here is [B, 14, 4, 32, 32]
         # print('type of vel_pred:', vel_pred.dtype) #float16
-        # vel_pred = vel_pred.to(torch.float32)  # Ensure float32 for precision,  # [B,T,C_latent, H_latent, W_latent]
+
 
         # print('type of self.pipe.scheduler.alphas_cumprod:', self.pipe.scheduler.alphas_cumprod.dtype) #float32
 
@@ -513,7 +513,7 @@ class FewShotVideoSRTrainer:
 
 
         # 6) 
-        alpha_bar = self.pipe.scheduler.alphas_cumprod[t]                  # [B]
+        alpha_bar = self.pipe.scheduler.alphas_cumprod[t]      # [B]      float32       
         # 扩成 [B,1,1,1,1] 便于广播到 [B,T,C,h,w]
         sqrt_ab  = alpha_bar.view(B, 1, 1, 1, 1).sqrt()
         sqrt_oma = (1.0 - alpha_bar).view(B, 1, 1, 1, 1).sqrt()
@@ -541,7 +541,7 @@ class FewShotVideoSRTrainer:
         ## 只对 mask=True 的槽位算损失
         ## indices_mask   # [B, N] bool
         if indices_mask.any().item():
-            # 为数值稳定，建议用 float32 算 loss，再把标量转回 self.data_type
+            # 为数值稳定，可以用 float32 算 loss，再把标量转回 self.data_type
             pre_flat = pre_vel_sel[indices_mask]   # [M, C, H_latent, W_latent]
             gt_flat  = gt_vel_sel[indices_mask]    # [M, C, H_latent, W_latent]
             L_denoise = F.mse_loss(pre_flat, gt_flat, reduction='mean')
@@ -555,7 +555,7 @@ class FewShotVideoSRTrainer:
         
         L_perc = 0
         if indices_mask.any().item():
-            # 为数值稳定，用 float32 算 loss，再把标量转回 self.data_type
+            # 为数值稳定，可以用 float32 算 loss，再把标量转回 self.data_type
             gen_hd_video_flat = gen_hd_video_sel[indices_mask]  # [M, C, H_video, W_video]
             gt_hd_video_flat  = hd_frames[indices_mask]    # [M, C, H_video, W_video]
             L_fid = F.mse_loss(gen_hd_video_flat, gt_hd_video_flat, reduction='mean')

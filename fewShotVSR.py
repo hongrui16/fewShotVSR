@@ -413,6 +413,8 @@ class FewShotVideoSRTrainer:
 
             if len(latents_sel):
                 latents_sel = torch.cat(latents_sel, dim=0)
+                print('latents_out.dtype:', latents_out.dtype)
+                print('latents_sel.dtype:', latents_sel.dtype)
                 latents_out[flat_idx] = latents_sel
 
         # 还原形状并做 scaling factor

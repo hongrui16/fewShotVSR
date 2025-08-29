@@ -107,8 +107,7 @@ class FewShotVideoSRTrainer:
             self.pipe.enable_xformers_memory_efficient_attention()
         except Exception:
             pass
-        self.pipe.vae.enable_slicing()
-        self.pipe.vae.enable_tiling()
+
 
 
         self.pipe.vae.eval().requires_grad_(False)      # 不更新 VAE 权重，但允许梯度对输入生效

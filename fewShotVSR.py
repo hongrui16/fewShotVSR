@@ -389,7 +389,7 @@ class FewShotVideoSRTrainer:
         # 预分配输出（零占位，避免对未选中的帧做编码）
         # latents_out = torch.zeros(B * TN, latent_ch, h, w, device=self.device, dtype=vae.dtype)
         latents_out = torch.zeros(B * TN, latent_ch, h, w, device=self.device, dtype=self.amp_dtype)
-        
+
         # 选中项的扁平索引
         if mask.any():
             # 展平成 [B*T]，取被选中的全局下标
@@ -439,9 +439,9 @@ class FewShotVideoSRTrainer:
 
         sparse_indices = self.fixed_indices.view(1, self.N).expand(B, -1).to(self.device)  # [B,N]
 
-        lr_frames = lr_frames.to(self.device, dtype=self.data_type)
-        hd_frames = hd_frames.to(self.device, dtype=self.data_type)
-        
+        lr_frames = lr_frames.to(self.device, dtype=torch.float32)
+        hd_frames = hd_frames.to(self.device, dtype=torch.float32)
+
         indices_mask = indices_mask.to(self.device, dtype=torch.bool)
 
         # Get LR conditioning latents (separate)
@@ -450,10 +450,12 @@ class FewShotVideoSRTrainer:
 
 
         cond_hd_latents = self.get_frame_latents(hd_frames, indices_mask)  # [B, N, C_latent, H_latent, W_latent]
+        print('cond_hd_latents.dtype:', cond_hd_latents.dtype) # torch.bfloat16
 
         # 把 N 个槽位的 HR latents “散射”到时间轴 [B,T,...]
         latent_ind_over_T = sparse_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(B, self.N, C_latent, H_latent, W_latent)
-        hd_latent_over_T = torch.zeros(B, T, C_latent, H_latent, W_latent, device=lr_frames.device, dtype=self.data_type)        
+        hd_latent_over_T = torch.zeros(B, T, C_latent, H_latent, W_latent, device=lr_frames.device, dtype=torch.float32)        
+        print('hd_latent_over_T.dtype:', hd_latent_over_T.dtype) # torch.float32
         hd_latent_over_T.scatter_(1, latent_ind_over_T, cond_hd_latents)  # 未启用的槽位本身是全零
 
 
@@ -477,7 +479,7 @@ class FewShotVideoSRTrainer:
         added_time_ids = self.get_added_time_ids(batch_size=B)
 
         ### 2) add noise
-        gt_noise = torch.randn_like(full_cond_latents, device=self.device, dtype=self.data_type)  # [B, T, C_latent, H_latent, W_latent]
+        gt_noise = torch.randn_like(full_cond_latents, device=self.device, dtype=torch.float32)  # [B, T, C_latent, H_latent, W_latent]
         z_t = self.pipe.scheduler.add_noise(full_cond_latents, gt_noise, t)   ## [B, T, C_latent, H_latent, W_latent]
 
         ## 3)
@@ -598,9 +600,9 @@ class FewShotVideoSRTrainer:
 
         # 对参与的 video 取平均；若没有任何 video 满足条件，则置 0
         if vid_count > 0:
-            L_hd_temp = (L_hd_temp / vid_count).to(self.data_type)
+            L_hd_temp = L_hd_temp / vid_count
         else:
-            L_hd_temp = torch.zeros((), device=self.device, dtype=self.data_type)
+            L_hd_temp = graph_zero
         
 
         # Temporal loss (normalize frames to [0,1] for RAFT)

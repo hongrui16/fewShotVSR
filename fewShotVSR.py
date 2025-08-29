@@ -428,6 +428,7 @@ class FewShotVideoSRTrainer:
         return latents
 
     def decode_fn(self, latents, decode_chunk_size):
+        ## to save memory, decode_chunk_size should be small
         video = self.pipe.decode_latents(latents, num_frames=latents.shape[1], decode_chunk_size=decode_chunk_size)  # Keep small chunk_size for finer memory control
         return video.permute(0, 2, 1, 3, 4).clamp(-1, 1)
 
@@ -532,7 +533,7 @@ class FewShotVideoSRTrainer:
         #     gen_video = gen_video.permute(0, 2, 1, 3, 4).clamp(-1, 1) ## [B, T, C_video, H_video, W_video]
 
         # Use checkpoint to decode with gradients but lower memory
-        gen_video = checkpoint(self.decode_fn, pred_original, decode_chunk_size=14)
+        gen_video = checkpoint(self.decode_fn, pred_original, decode_chunk_size=2, use_reentrant=False)
         # print(f'gen_video shape: {gen_video.shape}')
 
         

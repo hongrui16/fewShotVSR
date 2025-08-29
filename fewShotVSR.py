@@ -14,7 +14,7 @@ from torch.utils.checkpoint import checkpoint
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import GradScaler, autocast
 
 from dummy_dataset import DummyFewShotDataset
 

@@ -439,23 +439,25 @@ class FewShotVideoSRTrainer:
 
         sparse_indices = self.fixed_indices.view(1, self.N).expand(B, -1).to(self.device)  # [B,N]
 
-        lr_frames = lr_frames.to(self.device, dtype=torch.float32)
-        hd_frames = hd_frames.to(self.device, dtype=torch.float32)
+        lr_frames = lr_frames.to(self.device, dtype=self.amp_dtype)
+        hd_frames = hd_frames.to(self.device, dtype=self.amp_dtype)
 
         indices_mask = indices_mask.to(self.device, dtype=torch.bool)
 
-        # Get LR conditioning latents (separate)
+        # # 1) Get LR conditioning latents (separate)
         cond_lr_latents = self.get_frame_latents(lr_frames)
         B, T, C_latent, H_latent, W_latent = cond_lr_latents.shape
+        latent_dtype = cond_lr_latents.dtype
 
 
         cond_hd_latents = self.get_frame_latents(hd_frames, indices_mask)  # [B, N, C_latent, H_latent, W_latent]
-        print('cond_hd_latents.dtype:', cond_hd_latents.dtype) # torch.bfloat16
+        # print('cond_hd_latents.dtype:', cond_hd_latents.dtype) # torch.bfloat16
+        assert cond_hd_latents.dtype == latent_dtype, f"cond_hd_latents.dtype {cond_hd_latents.dtype} != cond_lr_latents.dtype {latent_dtype}"
 
         # 把 N 个槽位的 HR latents “散射”到时间轴 [B,T,...]
         latent_ind_over_T = sparse_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(B, self.N, C_latent, H_latent, W_latent)
-        hd_latent_over_T = torch.zeros(B, T, C_latent, H_latent, W_latent, device=lr_frames.device, dtype=torch.float32)        
-        print('hd_latent_over_T.dtype:', hd_latent_over_T.dtype) # torch.float32
+        hd_latent_over_T = torch.zeros(B, T, C_latent, H_latent, W_latent, device=lr_frames.device, dtype=latent_dtype)        
+        # print('hd_latent_over_T.dtype:', hd_latent_over_T.dtype) # torch.bfloat16
         hd_latent_over_T.scatter_(1, latent_ind_over_T, cond_hd_latents)  # 未启用的槽位本身是全零
 
 
@@ -473,25 +475,25 @@ class FewShotVideoSRTrainer:
         full_cond_latents = w * hd_latent_over_T + (1.0 - w) * cond_lr_latents  # [B,T,C_latent, H_latent, W_latent]
 
 
-        ## 1) Sample timestep
+        ## 2) Sample timestep
         t = torch.randint(0, self.pipe.scheduler.config.num_train_timesteps, (B,), dtype=torch.long).to(self.device)
         # Get added time IDs
         added_time_ids = self.get_added_time_ids(batch_size=B)
 
-        ### 2) add noise
-        gt_noise = torch.randn_like(full_cond_latents, device=self.device, dtype=torch.float32)  # [B, T, C_latent, H_latent, W_latent]
+        ### 3) add noise
+        gt_noise = torch.randn_like(full_cond_latents, device=self.device)  # [B, T, C_latent, H_latent, W_latent]
         z_t = self.pipe.scheduler.add_noise(full_cond_latents, gt_noise, t)   ## [B, T, C_latent, H_latent, W_latent]
 
-        ## 3)
+        ## 4)
         # Get HD embeddings with pos (separate)
         image_embeddings, _ = self.build_image_embeddings(lr_frames, hd_frames, sparse_indices)
         
         
-        ## 4)
+        ## 5) UNet 预测 velocity（保持 latent_dtype）
         # Prepare UNet input: concat noisy target with LR conditioning
         latent_model_input = torch.cat([z_t, cond_lr_latents], dim=2)  # [1, T, 2*C, H_latent, W_latent]
 
-        ## 5) Predict velocity
+        ##  Predict velocity
         vel_pred = self.pipe.unet(
             latent_model_input,
             t,
@@ -500,7 +502,7 @@ class FewShotVideoSRTrainer:
             return_dict=False
         )[0]   ### vel_pred: [B, T, C_latent, h, w], here is [B, 14, 4, 32, 32]
         # print('type of vel_pred:', vel_pred.dtype) #float16
-        vel_pred = vel_pred.to(torch.float32)  # Ensure float32 for precision,  # [B,T,C_latent, H_latent, W_latent]
+        # vel_pred = vel_pred.to(torch.float32)  # Ensure float32 for precision,  # [B,T,C_latent, H_latent, W_latent]
 
         # print('type of self.pipe.scheduler.alphas_cumprod:', self.pipe.scheduler.alphas_cumprod.dtype) #float32
 
@@ -514,22 +516,23 @@ class FewShotVideoSRTrainer:
         sqrt_oma = (1.0 - alpha_bar).view(B, 1, 1, 1, 1).sqrt()
         # 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
         #    x0_hat = sqrt(ab)*x_t - sqrt(1-ab)*vel_pred
-        pred_original = (sqrt_ab * z_t.to(torch.float32) - sqrt_oma * vel_pred).clamp(-1, 1)       # [B,T,C,h,w]
-        pred_original = pred_original.to(torch.float32)
+        pred_original = (sqrt_ab * z_t.to(torch.float32) - sqrt_oma * vel_pred.to(torch.float32)).clamp(-1, 1)       # [B,T,C,h,w]
+        pred_original = pred_original.to(latent_dtype)                           # ←★ 回到半精度
 
-        # Decode to pixel space
-        gen_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, C_video, T, H_video, W_video]
-        gen_video = gen_video.permute(0, 2, 1, 3, 4).clamp(-1, 1).to(torch.float32) ## [B, T, C_video, H_video, W_video]
+
+        # 7) Decode to pixel space
+        gen_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1], decode_chunk_size = 2)  # 默认decode_chunk_size=14, [B, C_video, T, H_video, W_video]
+        gen_video = gen_video.permute(0, 2, 1, 3, 4).clamp(-1, 1) ## [B, T, C_video, H_video, W_video]
         # print(f'gen_video shape: {gen_video.shape}')
 
         
         
-        # 7) loss calculation
+        # 8) 构造 v 的 GT（fp32）并计算 denoise loss（只在选中的槽位）
         #    先取 \bar{alpha}_t，再构造 v_gt = sqrt(ab)*ε - sqrt(1-ab)*x0
         vel_gt = sqrt_ab * gt_noise.to(torch.float32) - sqrt_oma * full_cond_latents.to(torch.float32)                 # [B,T,C_latent, H_latent, W_latent]
 
         ##（只对选帧算 loss：先在 v_pred/v_gt 上做 gather 再 MSE）
-        pre_vel_sel = vel_pred.gather(1, latent_ind_over_T)  # [B, N, C_latent, H_latent, W_latent]
+        pre_vel_sel = vel_pred.to(torch.float32).gather(1, latent_ind_over_T)  # [B, N, C_latent, H_latent, W_latent]
         gt_vel_sel  = vel_gt.gather(1,  latent_ind_over_T)
         
         ## 只对 mask=True 的槽位算损失
@@ -543,10 +546,7 @@ class FewShotVideoSRTrainer:
             L_denoise = graph_zero
 
 
-
-        # print(f'generated_video_selected shape: {generated_video_selected.shape}')
-        # print(f'hd_frames shape: {hd_frames.shape}')
-
+        # 9) 像素监督（有 HD 才算）
         video_ind_over_T = sparse_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(B, self.N, C_video, H_video, W_video)
         gen_hd_video_sel = gen_video.gather(1, video_ind_over_T) # [B, N, C, H, W]
         
@@ -569,7 +569,7 @@ class FewShotVideoSRTrainer:
             # L_perc = torch.tensor(0.0, device=self.device, dtype=self.data_type)  
 
 
-        ### hd frames temporal loss
+        # 10) HD temporal  loss
         ## 归一化到 [0,1]，先不展平，保留 [B, N, C, H, W]，后面按 video 切片
         gen_hd_sel_norm = (gen_hd_video_sel.clamp(-1, 1) + 1) / 2
         gt_hd_norm  = (hd_frames.clamp(-1, 1) + 1) / 2
@@ -605,8 +605,7 @@ class FewShotVideoSRTrainer:
             L_hd_temp = graph_zero
         
 
-        # Temporal loss (normalize frames to [0,1] for RAFT)
-        
+        # 11) LR temporal（fp32）
         lr_norm = (lr_frames.clamp(-1, 1) + 1) / 2
         gen_norm = (gen_video.clamp(-1, 1) + 1) / 2        
         L_lr_temp = self.compute_temporal_loss(gen_norm, lr_norm)
@@ -617,7 +616,7 @@ class FewShotVideoSRTrainer:
         # print('type of L_lr_temp:', L_lr_temp.dtype)
         # print('type of L_hd_temp:', L_hd_temp.dtype)
 
-        # Total loss
+        # 12)  Total loss
         loss = L_denoise + 0.5 * L_fid + 0.5 * L_perc + 0.2 * L_lr_temp + 0.1 * L_hd_temp
         # loss = loss.to(self.data_type)  # Ensure same dtype as UNet
         print(f"Loss: L_denoise={L_denoise.item():.4f}, L_fid={L_fid.item():.4f}, "

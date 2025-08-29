@@ -10,21 +10,29 @@ import numpy as np
 from PIL import Image
 import torch.nn.functional as F
 
+from torch.cuda.amp import autocast, GradScaler
 
 from dummy_dataset import DummyFewShotDataset
 
 class FewShotVideoSRTrainer:
-    def __init__(self, device="cuda"):
-        self.device = device if torch.cuda.is_available() else "cpu"
+    def __init__(self, device="cpu"):
+        self.device = device
         self.motion_bucket_id = 127  # As in SVD, motion_bucket_id is 127
         self.noise_aug_strength = 0.02
         self.num_frames = 14  # For SVD, max frames is 14
         self.embed_dim = 768  # CLIP embed dimension
+
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+
+
         # Load SVD pipeline
         self.pipe = StableVideoDiffusionPipeline.from_pretrained(
             "stabilityai/stable-video-diffusion-img2vid",
             torch_dtype=torch.float16
         ).to(self.device)
+
 
         print(self.pipe.scheduler.config.prediction_type)  # "v_prediction"
 
@@ -72,8 +80,13 @@ class FewShotVideoSRTrainer:
         print("LoRA applied.")
 
 
-        self.data_type = self.pipe.unet.dtype
-        print(f'data_type: {self.data_type}')
+        self.param_type = self.pipe.unet.dtype
+        print(f'param_type: {self.param_type}')
+
+        self.data_type = torch.float32 
+
+        self.amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
         self.chunk_size = 8
        
         # LPIPS
@@ -88,6 +101,14 @@ class FewShotVideoSRTrainer:
         # Scheduler
         self.pipe.scheduler = DPMSolverMultistepScheduler.from_config(self.pipe.scheduler.config)
         self.pipe.scheduler.alphas_cumprod = self.pipe.scheduler.alphas_cumprod.to(self.device)
+
+        self.pipe.unet.enable_gradient_checkpointing()
+        try:
+            self.pipe.enable_xformers_memory_efficient_attention()
+        except Exception:
+            pass
+        self.pipe.vae.enable_slicing()
+        self.pipe.vae.enable_tiling()
 
 
         self.pipe.vae.eval().requires_grad_(False)      # 不更新 VAE 权重，但允许梯度对输入生效
@@ -114,57 +135,62 @@ class FewShotVideoSRTrainer:
         ).to(self.device)
         return added_time_ids
     
-    def compute_temporal_loss(self, generated_frames, gt_frames):
+    def compute_temporal_loss(self, generated_frames, gt_frames, step=2, scale=1.0):
         """
-        generated_frames: [B, M, 3, H, W]
-        gt_frames:        [B, M, 3, H, W]
-        返回一个对 generated_frames 可导的标量损失
+        generated_frames, gt_frames: [B, M, 3, H, W] 且应已是 [0,1] 归一化
+        step : 时间子采样步长（默认隔帧）
+        scale: 空间下采样比例（1.0/0.5/0.25 可显著降显存）
+        返回：对 generated_frames 可导的标量
         """
         B, M, C, H, W = generated_frames.shape
 
-        # 图内零：与计算图相连，避免断图
+        # 图内零，避免在无成对帧时断图
         graph_zero = generated_frames.sum() * 0.0
-
-        # 帧数不足 2 无法计算光流 —— 返回“图内零”
-        if M <= 1:
+        if M < 2:
             return graph_zero
 
-        # 统一到 fp32 做光流与 MSE
-        generated_frames = generated_frames.to(torch.float32)
-        gt_frames        = gt_frames.to(torch.float32)
+        # 选取 (t, t+1) 的成对索引（子采样）
+        idx = torch.arange(0, M - 1, step, device=generated_frames.device)
+        if idx.numel() == 0:
+            return graph_zero
 
-        # 确保 RAFT 处于 eval 状态且不更新参数，但不要包 no_grad（这样对输入仍可导）
+        # 取相邻帧并批量化：[(B, |idx|, 3, H, W) -> (B*|idx|, 3, H, W)]
+        gen1 = generated_frames[:, idx]          # [B,P,3,H,W]
+        gen2 = generated_frames[:, idx + 1]      # [B,P,3,H,W]
+        lr1  = gt_frames[:, idx]
+        lr2  = gt_frames[:, idx + 1]
+        P = gen1.shape[1]
+
+        gen1 = gen1.reshape(B * P, C, H, W)
+        gen2 = gen2.reshape(B * P, C, H, W)
+        lr1  = lr1.reshape(B * P, C, H, W)
+        lr2  = lr2.reshape(B * P, C, H, W)
+
+        # 可选：下采样到更小分辨率喂给 RAFT，显著省显存
+        if scale != 1.0:
+            new_hw = (max(1, int(H * scale)), max(1, int(W * scale)))
+            gen1 = F.interpolate(gen1, size=new_hw, mode="bilinear", align_corners=False)
+            gen2 = F.interpolate(gen2, size=new_hw, mode="bilinear", align_corners=False)
+            lr1  = F.interpolate(lr1,  size=new_hw, mode="bilinear", align_corners=False)
+            lr2  = F.interpolate(lr2,  size=new_hw, mode="bilinear", align_corners=False)
+
+        # 冻结 RAFT 权重，但允许对输入回传
         self.raft.eval()
         for p in self.raft.parameters():
             p.requires_grad = False
 
-        L_temp = graph_zero  # 从图内零开始累加，保持可导链
-        pair_count = 0
+        # 用 AMP 跑 RAFT，进一步降显存；学生分支可导，教师分支 no_grad
+        with autocast(device_type="cuda", dtype=getattr(self, "amp_dtype", torch.float16)):
+            flow_gen = self.raft(gen1, gen2)[-1]            # [B*P,2,h,w]  ← 可导
+        with torch.no_grad(), autocast(device_type="cuda", dtype=getattr(self, "amp_dtype", torch.float16)):
+            flow_gt  = self.raft(lr1,  lr2)[-1]             # 教师光流，不回传
 
-        for b in range(B):
-            for i in range(M - 1):
-                gen1 = generated_frames[b, i].unsqueeze(0)     # [1, 3, H, W]
-                gen2 = generated_frames[b, i + 1].unsqueeze(0)
-                gt1  = gt_frames[b, i].unsqueeze(0)
-                gt2  = gt_frames[b, i + 1].unsqueeze(0)
+        # 直接在下采样尺度上做 MSE；也可以插值回原分辨率再比（更贵）
+        L = F.mse_loss(flow_gen, flow_gt, reduction="mean")
 
-                # 生成光流：可导（不加 no_grad）
-                flow_gen = self.raft(gen1, gen2)[-1]           # [1, 2, H, W]
+        # 标量，保持 fp32 更稳
+        return L.float()
 
-                # GT 光流：不需要梯度
-                with torch.no_grad():
-                    flow_gt = self.raft(gt1, gt2)[-1]
-
-                L_temp = L_temp + F.mse_loss(flow_gen, flow_gt, reduction="mean")
-                pair_count += 1
-
-        if pair_count > 0:
-            loss = L_temp / pair_count
-        else:
-            loss = graph_zero
-
-        # 建议保持 fp32；如果你整个训练用了 AMP，GradScaler 会处理混精度
-        return loss
 
 
     def positional_encoding(self, pos_ids):
@@ -181,22 +207,6 @@ class FewShotVideoSRTrainer:
         pe[..., 1::2] = torch.cos(position * div_term)
         return pe
 
-
-    # def get_hd_embeddings(self, hd_frames, sparse_indices):
-    #     """
-    #     hd_frames: tensor (B, N, 3, H, W) HD视频帧
-    #     sparse_indices: tensor (B, N) 对应帧索引（顺序对应 hd_frames）
-    #     Returns: tensor (B, N, embed_dim)
-    #     """
-    #     B, N, C, H, W = hd_frames.shape
-    #     # 展平 batch 和时间维度，送入 CLIP image encoder
-    #     frames_flat = hd_frames.reshape(B * N, C, H, W) # [BN, 3, H, W]
-    #     # 提取图像特征
-    #     embeds = self.pipe._encode_image(frames_flat, self.device, 1, False) # [BN embed_dim]
-    #     embeds = embeds.view(B, N, -1) # [B, N, embed_dim]
-    #     # 生成位置编码
-    #     pe = self.positional_encoding(sparse_indices, max_pos=self.num_frames, d_model=self.embed_dim) # [B, N, embed_dim]
-    #     return embeds + pe
 
     @torch.no_grad()
     def _encode_frames_clip(self, frames):
@@ -494,6 +504,8 @@ class FewShotVideoSRTrainer:
 
         # print('type of self.pipe.scheduler.alphas_cumprod:', self.pipe.scheduler.alphas_cumprod.dtype) #float32
 
+        graph_zero = vel_pred.sum() * 0.0
+
 
         # 6) 
         alpha_bar = self.pipe.scheduler.alphas_cumprod[t]                  # [B]
@@ -502,26 +514,19 @@ class FewShotVideoSRTrainer:
         sqrt_oma = (1.0 - alpha_bar).view(B, 1, 1, 1, 1).sqrt()
         # 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
         #    x0_hat = sqrt(ab)*x_t - sqrt(1-ab)*vel_pred
-        z_t = z_t.to(torch.float32)  # Ensure float32 for precision
-        pred_original = (sqrt_ab * z_t - sqrt_oma * vel_pred).clamp(-1, 1)       # [B,T,C,h,w]
-        pred_original = pred_original.to(self.data_type)
+        pred_original = (sqrt_ab * z_t.to(torch.float32) - sqrt_oma * vel_pred).clamp(-1, 1)       # [B,T,C,h,w]
+        pred_original = pred_original.to(torch.float32)
 
         # Decode to pixel space
         gen_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1])  # 默认decode_chunk_size=14, [B, C_video, T, H_video, W_video]
-        gen_video = gen_video.permute(0, 2, 1, 3, 4) ## [B, T, C_video, H_video, W_video]
-        gen_video = gen_video.clamp(-1, 1)
-        gen_video = gen_video.to(self.data_type)
+        gen_video = gen_video.permute(0, 2, 1, 3, 4).clamp(-1, 1).to(torch.float32) ## [B, T, C_video, H_video, W_video]
         # print(f'gen_video shape: {gen_video.shape}')
 
         
         
         # 7) loss calculation
-        gt_noise = gt_noise.to(torch.float32)  # Ensure float32 for precision
-        full_cond_latents = full_cond_latents.to(torch.float32)  # Ensure float32 for precision
-        
         #    先取 \bar{alpha}_t，再构造 v_gt = sqrt(ab)*ε - sqrt(1-ab)*x0
-        vel_gt = sqrt_ab * gt_noise - sqrt_oma * full_cond_latents                 # [B,T,C_latent, H_latent, W_latent]
-        # print('type of v_gt:', v_gt.dtype) #float32
+        vel_gt = sqrt_ab * gt_noise.to(torch.float32) - sqrt_oma * full_cond_latents.to(torch.float32)                 # [B,T,C_latent, H_latent, W_latent]
 
         ##（只对选帧算 loss：先在 v_pred/v_gt 上做 gather 再 MSE）
         pre_vel_sel = vel_pred.gather(1, latent_ind_over_T)  # [B, N, C_latent, H_latent, W_latent]
@@ -531,12 +536,11 @@ class FewShotVideoSRTrainer:
         ## indices_mask   # [B, N] bool
         if indices_mask.any().item():
             # 为数值稳定，建议用 float32 算 loss，再把标量转回 self.data_type
-            pre_flat = pre_vel_sel[indices_mask].to(torch.float32)   # [M, C, H_latent, W_latent]
-            gt_flat  = gt_vel_sel[indices_mask].to(torch.float32)    # [M, C, H_latent, W_latent]
-            L_denoise = F.mse_loss(pre_flat, gt_flat, reduction='mean') \
-                            .to(self.data_type)
+            pre_flat = pre_vel_sel[indices_mask]   # [M, C, H_latent, W_latent]
+            gt_flat  = gt_vel_sel[indices_mask]    # [M, C, H_latent, W_latent]
+            L_denoise = F.mse_loss(pre_flat, gt_flat, reduction='mean')
         else:
-            L_denoise = torch.tensor(0.0, device=self.device, dtype=self.data_type)
+            L_denoise = graph_zero
 
 
 
@@ -549,10 +553,9 @@ class FewShotVideoSRTrainer:
         L_perc = 0
         if indices_mask.any().item():
             # 为数值稳定，用 float32 算 loss，再把标量转回 self.data_type
-            gen_hd_video_flat = gen_hd_video_sel[indices_mask].to(torch.float32)   # [M, C, H_video, W_video]
-            gt_hd_video_flat  = hd_frames[indices_mask].to(torch.float32)    # [M, C, H_video, W_video]
-            L_fid = F.mse_loss(gen_hd_video_flat, gt_hd_video_flat, reduction='mean') \
-                            .to(self.data_type)
+            gen_hd_video_flat = gen_hd_video_sel[indices_mask]  # [M, C, H_video, W_video]
+            gt_hd_video_flat  = hd_frames[indices_mask]    # [M, C, H_video, W_video]
+            L_fid = F.mse_loss(gen_hd_video_flat, gt_hd_video_flat, reduction='mean')
 
             # Perceptual loss (average over frames)
             # M = gen_hd_video_flat.shape[0]
@@ -562,7 +565,7 @@ class FewShotVideoSRTrainer:
         
             
         else:
-            L_fid = torch.tensor(0.0, device=self.device, dtype=self.data_type)
+            L_fid = graph_zero
             # L_perc = torch.tensor(0.0, device=self.device, dtype=self.data_type)  
 
 
@@ -575,7 +578,7 @@ class FewShotVideoSRTrainer:
         gen_hd_sel_norm = gen_hd_sel_norm.to(torch.float32)
         gt_hd_norm  = gt_hd_norm.to(torch.float32)
 
-        L_hd_temp = torch.zeros((), device=self.device, dtype=torch.float32)
+        L_hd_temp = graph_zero
         vid_count = 0
 
         for b in range(gen_hd_sel_norm.shape[0]):  # 遍历每个 video
@@ -621,32 +624,47 @@ class FewShotVideoSRTrainer:
               f"L_perc={L_perc.item():.4f}, L_lr_temp={L_lr_temp.item():.4f}, L_hd_temp={L_hd_temp.item():.4f}")
         return loss
 
-    def train(self, dataset, epochs=100, debug = False):
+    def train(self, dataset, epochs=100, debug = False, grad_accum=1):
+        use_scaler = (self.amp_dtype == torch.float16)
+        scaler = GradScaler(enabled=use_scaler)
+
+
         for epoch in range(epochs):
             total_loss = 0.0
+            self.optimizer.zero_grad(set_to_none=True)
+
             for i, batch in enumerate(dataset):
-                self.optimizer.zero_grad(set_to_none=True)
-                with torch.autocast(self.device, dtype=torch.float16):
-                    # Assume batch = (lr_frames, hd_frames, sparse_indices)
-                    lr_frames, hd_frames, mask = batch
-                    # print(f'Batch {i+1}: lr_frames {lr_frames.shape}, hd_frames {hd_frames.shape}, mask {mask.shape}')
-                    # print('mask', mask)
-                    loss = self.compute_loss(lr_frames, hd_frames, mask)
-                    # print('type of loss:', loss.dtype)
+                lr_frames, hd_frames, mask = batch
+
+                with autocast(device_type="cuda", dtype=self.amp_dtype):
+                    loss = self.compute_loss(lr_frames, hd_frames, mask) / grad_accum
+
+                if use_scaler:
+                    scaler.scale(loss).backward()
+                else:
                     loss.backward()
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
-                    total_loss += loss.item()
-                    if debug and i > 5:
-                        break
+
+                if (i + 1) % grad_accum == 0:
+                    if use_scaler:
+                        scaler.step(self.optimizer); scaler.update()
+                    else:
+                        self.optimizer.step()
+                    self.optimizer.zero_grad(set_to_none=True)
+
+                total_loss += loss.item() * grad_accum
+                if debug and i > 5:
+                    break
+
             avg_loss = total_loss / len(dataset)
             print(f"Epoch {epoch + 1}/{epochs}, Avg Loss: {avg_loss:.4f}\n")
             if debug and epoch > 2:
                 break
-        print("Training complete.")
+    print("Training complete.")
+
 
 
 if __name__ == "__main__":
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     dataset = DummyFewShotDataset()
-    trainer = FewShotVideoSRTrainer(device="cuda")
+    trainer = FewShotVideoSRTrainer(device=device)
     trainer.train(dataset, epochs=10, debug=True)

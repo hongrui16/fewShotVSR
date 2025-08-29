@@ -638,7 +638,8 @@ class FewShotVideoSRTrainer:
 
     def train(self, dataset, epochs=100, debug = False, grad_accum=1):
         use_scaler = (self.amp_dtype == torch.float16)
-        scaler = GradScaler(enabled=use_scaler)
+        scaler = GradScaler("cuda", enabled=use_scaler)
+
 
 
         for epoch in range(epochs):
@@ -648,7 +649,7 @@ class FewShotVideoSRTrainer:
             for i, batch in enumerate(dataset):
                 lr_frames, hd_frames, mask = batch
 
-                with autocast(dtype=self.amp_dtype):
+                with autocast("cuda", dtype=self.amp_dtype):
                     loss = self.compute_loss(lr_frames, hd_frames, mask) / grad_accum
 
                 if use_scaler:

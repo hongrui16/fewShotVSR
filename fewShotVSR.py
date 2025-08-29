@@ -134,7 +134,7 @@ class FewShotVideoSRTrainer:
         ).to(self.device)
         return added_time_ids
     
-    def compute_temporal_loss(self, generated_frames, gt_frames, step=2, scale=1.0):
+    def compute_temporal_loss(self, generated_frames, gt_frames, step=1, scale=1.0):
         """
         generated_frames, gt_frames: [B, M, 3, H, W] 且应已是 [0,1] 归一化
         step : 时间子采样步长（默认隔帧）
@@ -595,7 +595,7 @@ class FewShotVideoSRTrainer:
             gt_seq   = gt_seq.unsqueeze(0)
 
             # 累加该 video 的时序损失（标量）
-            L_hd_temp = L_hd_temp + self.compute_temporal_loss(pred_seq, gt_seq)
+            L_hd_temp = L_hd_temp + self.compute_temporal_loss(pred_seq, gt_seq, scale = 0.5)
             vid_count += 1
 
         # 对参与的 video 取平均；若没有任何 video 满足条件，则置 0
@@ -608,7 +608,7 @@ class FewShotVideoSRTrainer:
         # 11) LR temporal（fp32）
         lr_norm = (lr_frames.clamp(-1, 1) + 1) / 2
         gen_norm = (gen_video.clamp(-1, 1) + 1) / 2        
-        L_lr_temp = self.compute_temporal_loss(gen_norm, lr_norm)
+        L_lr_temp = self.compute_temporal_loss(gen_norm, lr_norm, step = 2, scale = 0.5)
 
 
         # print('type of L_denoise:', L_denoise.dtype)

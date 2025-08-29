@@ -106,6 +106,7 @@ class FewShotVideoSRTrainer:
         self.pipe.unet.enable_gradient_checkpointing()
         try:
             self.pipe.enable_xformers_memory_efficient_attention()
+            print("xFormers enabled.")
         except Exception:
             print("xFormers not available. Proceeding without it.")
             pass

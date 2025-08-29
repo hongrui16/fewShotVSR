@@ -387,8 +387,9 @@ class FewShotVideoSRTrainer:
             mask = mask.to(torch.bool).to(device)
 
         # 预分配输出（零占位，避免对未选中的帧做编码）
-        latents_out = torch.zeros(B * TN, latent_ch, h, w, device=self.device, dtype=vae.dtype)
-
+        # latents_out = torch.zeros(B * TN, latent_ch, h, w, device=self.device, dtype=vae.dtype)
+        latents_out = torch.zeros(B * TN, latent_ch, h, w, device=self.device, dtype=self.amp_dtype)
+        
         # 选中项的扁平索引
         if mask.any():
             # 展平成 [B*T]，取被选中的全局下标
@@ -413,9 +414,9 @@ class FewShotVideoSRTrainer:
 
             if len(latents_sel):
                 latents_sel = torch.cat(latents_sel, dim=0)
-                print('latents_out.dtype:', latents_out.dtype)
-                print('latents_sel.dtype:', latents_sel.dtype)
-                latents_out[flat_idx] = latents_sel
+                # print('latents_out.dtype:', latents_out.dtype) # torch.float16
+                # print('latents_sel.dtype:', latents_sel.dtype) # torch.bfloat16
+                latents_out[flat_idx] = latents_sel.to(latents_out.dtype)
 
         # 还原形状并做 scaling factor
         latents = latents_out.reshape(B, TN, latent_ch, h, w)

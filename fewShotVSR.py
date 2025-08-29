@@ -623,8 +623,7 @@ class FewShotVideoSRTrainer:
         # 12)  Total loss
         loss = L_denoise + 0.5 * L_fid + 0.5 * L_perc + 0.2 * L_lr_temp + 0.1 * L_hd_temp
         # loss = loss.to(self.data_type)  # Ensure same dtype as UNet
-        print(f"Loss: L_denoise={L_denoise.item():.4f}, L_fid={L_fid.item():.4f}, "
-              f"L_perc={L_perc.item():.4f}, L_lr_temp={L_lr_temp.item():.4f}, L_hd_temp={L_hd_temp.item():.4f}")
+        print(f"Loss: L_denoise={L_denoise.item():.4f}, L_fid={L_fid.item():.4f}, L_lr_temp={L_lr_temp.item():.4f}, L_hd_temp={L_hd_temp.item():.4f}")
         return loss
 
     def train(self, dataset, epochs=100, debug = False, grad_accum=1):

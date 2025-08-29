@@ -9,6 +9,7 @@ from torchvision.models.optical_flow import raft_small
 import numpy as np
 from PIL import Image
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from torch.cuda.amp import autocast, GradScaler
 
@@ -426,7 +427,10 @@ class FewShotVideoSRTrainer:
         # latents = latents * vae.config.scaling_factor
         return latents
 
-    
+    def decode_fn(self, latents, decode_chunk_size):
+        video = self.pipe.decode_latents(latents, num_frames=latents.shape[1], decode_chunk_size=decode_chunk_size)  # Keep small chunk_size for finer memory control
+        return video.permute(0, 2, 1, 3, 4).clamp(-1, 1)
+
     def compute_loss(self, lr_frames, hd_frames, indices_mask):
         '''
         Compute the loss for a batch of LR and HD frames.
@@ -522,12 +526,14 @@ class FewShotVideoSRTrainer:
         pred_original = (sqrt_ab * z_t.to(self.data_type) - sqrt_oma * vel_pred.to(self.data_type)).clamp(-1, 1)       # [B,T,C,h,w]
         pred_original = pred_original.to(latent_dtype)                           # ←★ 回到半精度
 
+        # 7) Decode to pixel space
+        # with torch.no_grad():            
+        #     gen_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1], decode_chunk_size = 14)  # 默认decode_chunk_size=14, [B, C_video, T, H_video, W_video]
+        #     gen_video = gen_video.permute(0, 2, 1, 3, 4).clamp(-1, 1) ## [B, T, C_video, H_video, W_video]
 
-        with torch.no_grad():
-            # 7) Decode to pixel space
-            gen_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1], decode_chunk_size = 2)  # 默认decode_chunk_size=14, [B, C_video, T, H_video, W_video]
-            gen_video = gen_video.permute(0, 2, 1, 3, 4).clamp(-1, 1) ## [B, T, C_video, H_video, W_video]
-            # print(f'gen_video shape: {gen_video.shape}')
+        # Use checkpoint to decode with gradients but lower memory
+        gen_video = checkpoint(self.decode_fn, pred_original, decode_chunk_size=14)
+        # print(f'gen_video shape: {gen_video.shape}')
 
         
         

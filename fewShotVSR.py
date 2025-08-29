@@ -173,21 +173,17 @@ class FewShotVideoSRTrainer:
             lr1  = F.interpolate(lr1,  size=new_hw, mode="bilinear", align_corners=False)
             lr2  = F.interpolate(lr2,  size=new_hw, mode="bilinear", align_corners=False)
 
-        # 冻结 RAFT 权重，但允许对输入回传
-        self.raft.eval()
-        for p in self.raft.parameters():
-            p.requires_grad = False
 
-        # 用 AMP 跑 RAFT，进一步降显存；学生分支可导，教师分支 no_grad
-        with autocast(device_type="cuda", dtype=getattr(self, "amp_dtype", torch.float16)):
-            flow_gen = self.raft(gen1, gen2)[-1]            # [B*P,2,h,w]  ← 可导
-        with torch.no_grad(), autocast(device_type="cuda", dtype=getattr(self, "amp_dtype", torch.float16)):
-            flow_gt  = self.raft(lr1,  lr2)[-1]             # 教师光流，不回传
 
-        # 直接在下采样尺度上做 MSE；也可以插值回原分辨率再比（更贵）
+        # gen分支（gen）可导；gt分支（lr）不需要梯度
+        flow_gen = self.raft(gen1, gen2)[-1]          # 和外层 autocast 保持一致精度
+        with torch.no_grad():
+            flow_gt  = self.raft(lr1,  lr2)[-1]
+
+        # 直接在当前尺度上做 MSE
         L = F.mse_loss(flow_gen, flow_gt, reduction="mean")
 
-        # 标量，保持 fp32 更稳
+        # 返回 fp32 标量更稳（不影响显存）
         return L.float()
 
 
@@ -635,7 +631,7 @@ class FewShotVideoSRTrainer:
             for i, batch in enumerate(dataset):
                 lr_frames, hd_frames, mask = batch
 
-                with autocast(device_type="cuda", dtype=self.amp_dtype):
+                with autocast(dtype=self.amp_dtype):
                     loss = self.compute_loss(lr_frames, hd_frames, mask) / grad_accum
 
                 if use_scaler:

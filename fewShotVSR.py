@@ -523,10 +523,11 @@ class FewShotVideoSRTrainer:
         pred_original = pred_original.to(latent_dtype)                           # ←★ 回到半精度
 
 
-        # 7) Decode to pixel space
-        gen_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1], decode_chunk_size = 2)  # 默认decode_chunk_size=14, [B, C_video, T, H_video, W_video]
-        gen_video = gen_video.permute(0, 2, 1, 3, 4).clamp(-1, 1) ## [B, T, C_video, H_video, W_video]
-        # print(f'gen_video shape: {gen_video.shape}')
+        with torch.no_grad():
+            # 7) Decode to pixel space
+            gen_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1], decode_chunk_size = 2)  # 默认decode_chunk_size=14, [B, C_video, T, H_video, W_video]
+            gen_video = gen_video.permute(0, 2, 1, 3, 4).clamp(-1, 1) ## [B, T, C_video, H_video, W_video]
+            # print(f'gen_video shape: {gen_video.shape}')
 
         
         

@@ -11,6 +11,9 @@ from PIL import Image
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 from torch.cuda.amp import autocast, GradScaler
 
 from dummy_dataset import DummyFewShotDataset

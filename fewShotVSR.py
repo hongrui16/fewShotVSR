@@ -107,6 +107,7 @@ class FewShotVideoSRTrainer:
         try:
             self.pipe.enable_xformers_memory_efficient_attention()
         except Exception:
+            print("xFormers not available. Proceeding without it.")
             pass
 
 

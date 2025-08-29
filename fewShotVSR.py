@@ -649,7 +649,7 @@ class FewShotVideoSRTrainer:
             for i, batch in enumerate(dataset):
                 lr_frames, hd_frames, mask = batch
 
-                with autocast("cuda", dtype=self.amp_dtype):
+                with autocast("cuda", dtype=self.amp_dtype, enabled=use_scaler):
                     loss = self.compute_loss(lr_frames, hd_frames, mask) / grad_accum
 
                 if use_scaler:

@@ -83,7 +83,8 @@ class FewShotVideoSRTrainer:
         self.param_type = self.pipe.unet.dtype
         print(f'param_type: {self.param_type}')
 
-        self.data_type = torch.float32 
+        # self.data_type = torch.float32 
+        self.data_type = torch.float16
 
         self.amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
@@ -516,7 +517,7 @@ class FewShotVideoSRTrainer:
         sqrt_oma = (1.0 - alpha_bar).view(B, 1, 1, 1, 1).sqrt()
         # 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
         #    x0_hat = sqrt(ab)*x_t - sqrt(1-ab)*vel_pred
-        pred_original = (sqrt_ab * z_t.to(torch.float32) - sqrt_oma * vel_pred.to(torch.float32)).clamp(-1, 1)       # [B,T,C,h,w]
+        pred_original = (sqrt_ab * z_t.to(self.data_type) - sqrt_oma * vel_pred.to(self.data_type)).clamp(-1, 1)       # [B,T,C,h,w]
         pred_original = pred_original.to(latent_dtype)                           # ←★ 回到半精度
 
 
@@ -529,10 +530,10 @@ class FewShotVideoSRTrainer:
         
         # 8) 构造 v 的 GT（fp32）并计算 denoise loss（只在选中的槽位）
         #    先取 \bar{alpha}_t，再构造 v_gt = sqrt(ab)*ε - sqrt(1-ab)*x0
-        vel_gt = sqrt_ab * gt_noise.to(torch.float32) - sqrt_oma * full_cond_latents.to(torch.float32)                 # [B,T,C_latent, H_latent, W_latent]
+        vel_gt = sqrt_ab * gt_noise.to(self.data_type) - sqrt_oma * full_cond_latents.to(self.data_type)                 # [B,T,C_latent, H_latent, W_latent]
 
         ##（只对选帧算 loss：先在 v_pred/v_gt 上做 gather 再 MSE）
-        pre_vel_sel = vel_pred.to(torch.float32).gather(1, latent_ind_over_T)  # [B, N, C_latent, H_latent, W_latent]
+        pre_vel_sel = vel_pred.to(self.data_type).gather(1, latent_ind_over_T)  # [B, N, C_latent, H_latent, W_latent]
         gt_vel_sel  = vel_gt.gather(1,  latent_ind_over_T)
         
         ## 只对 mask=True 的槽位算损失
@@ -575,8 +576,8 @@ class FewShotVideoSRTrainer:
         gt_hd_norm  = (hd_frames.clamp(-1, 1) + 1) / 2
 
         # 转到更稳定的 dtype 做 loss
-        gen_hd_sel_norm = gen_hd_sel_norm.to(torch.float32)
-        gt_hd_norm  = gt_hd_norm.to(torch.float32)
+        gen_hd_sel_norm = gen_hd_sel_norm.to(self.data_type)
+        gt_hd_norm  = gt_hd_norm.to(self.data_type)
 
         L_hd_temp = graph_zero
         vid_count = 0
@@ -595,7 +596,7 @@ class FewShotVideoSRTrainer:
             gt_seq   = gt_seq.unsqueeze(0)
 
             # 累加该 video 的时序损失（标量）
-            L_hd_temp = L_hd_temp + self.compute_temporal_loss(pred_seq, gt_seq, scale = 0.5)
+            L_hd_temp = L_hd_temp + self.compute_temporal_loss(pred_seq, gt_seq, step = 1, scale = 0.5)
             vid_count += 1
 
         # 对参与的 video 取平均；若没有任何 video 满足条件，则置 0

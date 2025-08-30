@@ -90,7 +90,8 @@ class FewShotVideoSRTrainer:
         # self.data_type = torch.float32 
         self.data_type = torch.float16
 
-        self.amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        # self.amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        self.amp_dtype = torch.float16
 
         self.chunk_size = 8
        

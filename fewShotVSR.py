@@ -257,7 +257,7 @@ class FewShotVideoSRTrainer:
         D = lr_token.size(-1)
 
         tokens = lr_token.clone()
-        attn_mask = torch.zeros(B, T, device=device, dtype=torch.float32)
+        attn_mask = torch.zeros(B, T, device=device, dtype=lr_token.dtype)  # [B,T], HD位置=1 其余=0
 
         # 2) 若没有 HD 或 mask 全 False，直接返回 LR
         has_hd = (

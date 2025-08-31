@@ -12,7 +12,10 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+import sys, os
+sys.path.append(os.path.dirname(__file__))  # 把当前目录加入路径
 
 from torch.amp import GradScaler, autocast
 

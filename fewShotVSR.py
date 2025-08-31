@@ -14,13 +14,13 @@ from torch.utils.checkpoint import checkpoint
 import os
 # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-import sys, os
-sys.path.append(os.path.dirname(__file__))  # 把当前目录加入路径
+# import sys, os
+# sys.path.append(os.path.dirname(__file__))  # 把当前目录加入路径
 
 from torch.amp import GradScaler, autocast
 
 from dummy_dataset import DummyFewShotDataset
-from loss_func import *
+from loss_func import compute_temporal_loss, latent_warp_flow_loss
 
 class FewShotVideoSRTrainer:
     def __init__(self, device="cpu"):

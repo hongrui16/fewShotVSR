@@ -17,6 +17,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 from torch.amp import GradScaler, autocast
 
 from dummy_dataset import DummyFewShotDataset
+from loss_func import *
 
 class FewShotVideoSRTrainer:
     def __init__(self, device="cpu"):
@@ -29,7 +30,8 @@ class FewShotVideoSRTrainer:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-
+        self.use_latent_warp = True
+        print("Using latent warp:", self.use_latent_warp)
 
         # Load SVD pipeline
         self.pipe = StableVideoDiffusionPipeline.from_pretrained(
@@ -88,7 +90,7 @@ class FewShotVideoSRTrainer:
         print(f'param_type: {self.param_type}')
 
         # self.data_type = torch.float32 
-        self.data_type = torch.float16
+        self.data_type = torch.float32
 
         # self.amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         self.amp_dtype = torch.float16
@@ -142,59 +144,6 @@ class FewShotVideoSRTrainer:
         ).to(self.device)
         return added_time_ids
     
-    def compute_temporal_loss(self, generated_frames, gt_frames, step=1, scale=1.0):
-        """
-        generated_frames, gt_frames: [B, M, 3, H, W] 且应已是 [0,1] 归一化
-        step : 时间子采样步长（默认隔帧）
-        scale: 空间下采样比例（1.0/0.5/0.25 可显著降显存）
-        返回：对 generated_frames 可导的标量
-        """
-        B, M, C, H, W = generated_frames.shape
-
-        # 图内零，避免在无成对帧时断图
-        graph_zero = generated_frames.sum() * 0.0
-        if M < 2:
-            return graph_zero
-
-        # 选取 (t, t+1) 的成对索引（子采样）
-        idx = torch.arange(0, M - 1, step, device=generated_frames.device)
-        if idx.numel() == 0:
-            return graph_zero
-
-        # 取相邻帧并批量化：[(B, |idx|, 3, H, W) -> (B*|idx|, 3, H, W)]
-        gen1 = generated_frames[:, idx]          # [B,P,3,H,W]
-        gen2 = generated_frames[:, idx + 1]      # [B,P,3,H,W]
-        lr1  = gt_frames[:, idx]
-        lr2  = gt_frames[:, idx + 1]
-        P = gen1.shape[1]
-
-        gen1 = gen1.reshape(B * P, C, H, W)
-        gen2 = gen2.reshape(B * P, C, H, W)
-        lr1  = lr1.reshape(B * P, C, H, W)
-        lr2  = lr2.reshape(B * P, C, H, W)
-
-        # 可选：下采样到更小分辨率喂给 RAFT，显著省显存
-        if scale != 1.0:
-            new_hw = (max(1, int(H * scale)), max(1, int(W * scale)))
-            gen1 = F.interpolate(gen1, size=new_hw, mode="bilinear", align_corners=False)
-            gen2 = F.interpolate(gen2, size=new_hw, mode="bilinear", align_corners=False)
-            lr1  = F.interpolate(lr1,  size=new_hw, mode="bilinear", align_corners=False)
-            lr2  = F.interpolate(lr2,  size=new_hw, mode="bilinear", align_corners=False)
-
-
-
-        # gen分支（gen）可导；gt分支（lr）不需要梯度
-        flow_gen = self.raft(gen1, gen2)[-1]          # 和外层 autocast 保持一致精度
-        with torch.no_grad():
-            flow_gt  = self.raft(lr1,  lr2)[-1]
-
-        # 直接在当前尺度上做 MSE
-        L = F.mse_loss(flow_gen, flow_gt, reduction="mean")
-
-        # 返回 fp32 标量更稳（不影响显存）
-        return L.float()
-
-
 
     def positional_encoding(self, pos_ids):
         """
@@ -456,7 +405,7 @@ class FewShotVideoSRTrainer:
 
         indices_mask = indices_mask.to(self.device, dtype=torch.bool)
 
-        # # 1) Get LR conditioning latents (separate)
+        # 1) Get LR conditioning latents (separate)
         cond_lr_latents = self.get_frame_latents(lr_frames)
         B, T, C_latent, H_latent, W_latent = cond_lr_latents.shape
         latent_dtype = cond_lr_latents.dtype
@@ -466,14 +415,14 @@ class FewShotVideoSRTrainer:
         # print('cond_hd_latents.dtype:', cond_hd_latents.dtype) # torch.bfloat16
         assert cond_hd_latents.dtype == latent_dtype, f"cond_hd_latents.dtype {cond_hd_latents.dtype} != cond_lr_latents.dtype {latent_dtype}"
 
-        # 把 N 个槽位的 HR latents “散射”到时间轴 [B,T,...]
+        ## 把 N 个槽位的 HR latents “散射”到时间轴 [B,T,...]
         latent_ind_over_T = sparse_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(B, self.N, C_latent, H_latent, W_latent)
         hd_latent_over_T = torch.zeros(B, T, C_latent, H_latent, W_latent, device=lr_frames.device, dtype=latent_dtype)        
         # print('hd_latent_over_T.dtype:', hd_latent_over_T.dtype) # torch.bfloat16
         hd_latent_over_T.scatter_(1, latent_ind_over_T, cond_hd_latents)  # 未启用的槽位本身是全零
 
 
-        # 按 mask 构造时间权重图 w: [B,T,1,1,1]
+        ## 按 mask 构造时间权重图 w: [B,T,1,1,1]
         w = torch.zeros(B, T, 1, 1, 1, device=cond_hd_latents.device, dtype=cond_hd_latents.dtype)
         w.scatter_(
             1,
@@ -483,26 +432,25 @@ class FewShotVideoSRTrainer:
 
 
 
-        # 最终融合：只在 mask=True 的固定索引处，用 HR 覆盖 LR
+        ## 最终融合：只在 mask=True 的固定索引处，用 HR 覆盖 LR
         full_cond_latents = w * hd_latent_over_T + (1.0 - w) * cond_lr_latents  # [B,T,C_latent, H_latent, W_latent]
 
 
-        ## 2) Sample timestep
+        # 2) Sample timestep
         t = torch.randint(0, self.pipe.scheduler.config.num_train_timesteps, (B,), dtype=torch.long).to(self.device)
         # Get added time IDs
         added_time_ids = self.get_added_time_ids(batch_size=B)
 
-        ### 3) add noise
+        # 3) add noise
         gt_noise = torch.randn_like(full_cond_latents, device=self.device)  # [B, T, C_latent, H_latent, W_latent]
         z_t = self.pipe.scheduler.add_noise(full_cond_latents, gt_noise, t)   ## [B, T, C_latent, H_latent, W_latent]
 
-        ## 4)
-        # Get HD embeddings with pos (separate)
+        # 4) Get HD embeddings with pos (separate)
         image_embeddings, _ = self.build_image_embeddings(lr_frames, hd_frames, sparse_indices)
         
         
-        ## 5) UNet 预测 velocity（保持 latent_dtype）
-        # Prepare UNet input: concat noisy target with LR conditioning
+        # 5) UNet 预测 velocity（保持 latent_dtype）
+        ## Prepare UNet input: concat noisy target with LR conditioning
         latent_model_input = torch.cat([z_t, cond_lr_latents], dim=2)  # [1, T, 2*C, H_latent, W_latent]
 
         ##  Predict velocity
@@ -515,115 +463,117 @@ class FewShotVideoSRTrainer:
         )[0]   ### vel_pred: [B, T, C_latent, h, w], here is [B, 14, 4, 32, 32]
         # print('type of vel_pred:', vel_pred.dtype) #float16
 
-
-        # print('type of self.pipe.scheduler.alphas_cumprod:', self.pipe.scheduler.alphas_cumprod.dtype) #float32
-
         graph_zero = vel_pred.sum() * 0.0
 
 
-        # 6) 
+        # 6) compute x0 from predicted velocity
         alpha_bar = self.pipe.scheduler.alphas_cumprod[t]      # [B]      float32       
-        # 扩成 [B,1,1,1,1] 便于广播到 [B,T,C,h,w]
+        ## 扩成 [B,1,1,1,1] 便于广播到 [B,T,C,h,w]
         sqrt_ab  = alpha_bar.view(B, 1, 1, 1, 1).sqrt()
         sqrt_oma = (1.0 - alpha_bar).view(B, 1, 1, 1, 1).sqrt()
-        # 用 v→x0 公式直接求 pred_original（训练不需要 scheduler.step）
+        ## 用 v→x0 公式直接求 pred_original
         #    x0_hat = sqrt(ab)*x_t - sqrt(1-ab)*vel_pred
         pred_original = (sqrt_ab * z_t.to(self.data_type) - sqrt_oma * vel_pred.to(self.data_type)).clamp(-1, 1)       # [B,T,C,h,w]
         pred_original = pred_original.to(latent_dtype)                           # ←★ 回到半精度
 
-        # 7) Decode to pixel space
-        # with torch.no_grad():            
-        #     gen_video = self.pipe.decode_latents(pred_original, num_frames=pred_original.shape[1], decode_chunk_size = 14)  # 默认decode_chunk_size=14, [B, C_video, T, H_video, W_video]
-        #     gen_video = gen_video.permute(0, 2, 1, 3, 4).clamp(-1, 1) ## [B, T, C_video, H_video, W_video]
 
-        # Use checkpoint to decode with gradients but lower memory
-        gen_video = checkpoint(self.decode_fn, pred_original, decode_chunk_size=2, use_reentrant=False)
-        # print(f'gen_video shape: {gen_video.shape}')
-
-        
-        
-        # 8) 构造 v 的 GT（fp32）并计算 denoise loss（只在选中的槽位）
-        #    先取 \bar{alpha}_t，再构造 v_gt = sqrt(ab)*ε - sqrt(1-ab)*x0
+        # 7) 构造 v 的 GT（fp32）并计算 denoise loss（只在选中的槽位）
+        ## 先取 \bar{alpha}_t，再构造 v_gt = sqrt(ab)*ε - sqrt(1-ab)*x0
         vel_gt = sqrt_ab * gt_noise.to(self.data_type) - sqrt_oma * full_cond_latents.to(self.data_type)                 # [B,T,C_latent, H_latent, W_latent]
 
-        ##（只对选帧算 loss：先在 v_pred/v_gt 上做 gather 再 MSE）
-        pre_vel_sel = vel_pred.to(self.data_type).gather(1, latent_ind_over_T)  # [B, N, C_latent, H_latent, W_latent]
-        gt_vel_sel  = vel_gt.gather(1,  latent_ind_over_T)
-        
-        ## 只对 mask=True 的槽位算损失
-        ## indices_mask   # [B, N] bool
-        if indices_mask.any().item():
-            # 为数值稳定，可以用 float32 算 loss，再把标量转回 self.data_type
-            pre_flat = pre_vel_sel[indices_mask]   # [M, C, H_latent, W_latent]
-            gt_flat  = gt_vel_sel[indices_mask]    # [M, C, H_latent, W_latent]
-            L_denoise = F.mse_loss(pre_flat, gt_flat, reduction='mean')
-        else:
-            L_denoise = graph_zero
+        ##  还原全时序 HD 掩码：hd_mask_full[b, t]=True 表示该样本在 t 是 HD 槽且 active
+        hd_mask_full = torch.zeros(B, T, dtype=torch.bool, device=self.device)
+        bidx = torch.arange(B, device=self.device)
+        for n in range(self.N):  # self.N=2
+            t_idx = sparse_indices[:, n]                  # [B]
+            act   = indices_mask[:, n].bool()            # [B]
+            hd_mask_full[bidx[act], t_idx[act]] = True
+
+        ##  按样本自适应权重(0.5~0.7) ：有 HD 的样本，令 HD 占比 = alpha；无 HD 的样本，整体弱化/关掉
+        alpha = 0.65
+        w = torch.zeros(B, T, dtype=torch.float32, device=self.device)
+        k = hd_mask_full.sum(dim=1)  # [B]
+        den_hd = k.clamp(min=1).unsqueeze(1)                 # [B,1]
+        den_lr = (T - k).clamp(min=1).unsqueeze(1)           # [B,1]
 
 
-        # 9) 像素监督（有 HD 才算）
-        video_ind_over_T = sparse_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(B, self.N, C_video, H_video, W_video)
-        gen_hd_video_sel = gen_video.gather(1, video_ind_over_T) # [B, N, C, H, W]
-        
-        L_perc = 0
-        if indices_mask.any().item():
-            # 为数值稳定，可以用 float32 算 loss，再把标量转回 self.data_type
-            gen_hd_video_flat = gen_hd_video_sel[indices_mask]  # [M, C, H_video, W_video]
-            gt_hd_video_flat  = hd_frames[indices_mask]    # [M, C, H_video, W_video]
-            L_fid = F.mse_loss(gen_hd_video_flat, gt_hd_video_flat, reduction='mean')
+        w_hd = (alpha / den_hd)                              # [B,1]
+        w_lr = ((1.0 - alpha) / den_lr)                      # [B,1]
 
-            # Perceptual loss (average over frames)
-            # M = gen_hd_video_flat.shape[0]
-        
-            # L_perc = self.lpips(gen_hd_video_flat, gt_hd_video_flat).to(self.data_type)
-            # L_perc /= M
-        
+        w = torch.where(hd_mask_full, w_hd, w_lr)            # [B,T]
+
+        ## k==0 样本：，整体弱化/关掉（几乎关闭 denoise）
+        beta = 0.1
+        no_hd = (k == 0)
+        if no_hd.any():
+            w[no_hd] = beta / T  # w[b].zero_() 或 w[b].fill_(0.02)
+
+        w = w * T #让每样本权重和恒为 T，数值更稳
+        max_w = 8.0  # 避免个别样本权重过大
+        w = w.clamp(max=max_w)
+        w = w.view(B, T, 1, 1, 1).to(torch.float32)
+
+        ## 计算全帧加权 MSE（ fp32 计算）
+        diff = (vel_pred.to(torch.float32) - vel_gt.to(torch.float32)) ** 2  # [B,T,C,H,W]
+        L_denoise = (diff * w).mean().to(self.data_type)
+
+
+
+        if self.use_latent_warp:
+            # 8) Decode to pixel space
+            with torch.no_grad():            
+                gen_video = self.decode_fn(pred_original, decode_chunk_size = 14)  # 默认decode_chunk_size=14, [B, C_video, T, H_video, W_video]
+
+            pred_original = pred_original.to(self.data_type)
+            # 9) 计算光流损失
+            L_temp = latent_warp_flow_loss(
+            raft_model         = self.raft,
+            pred_x0_latents_f32 = pred_original,   # [B,T,C_lat,hz,wz]
+            frames_pixels           = lr_frames,     # [B,T,3,H,W], 任意精度输入，这里内部会转 [0,1]
+            step                = 2,
+            raft_scale          = 0.5
+            )
+
+            # 10) 计算重建loss
+            if indices_mask.any().item():
+                pred_latent_sel = pred_original.gather(1, latent_ind_over_T) # [B,N,C_lat,hz,wz]
+                pred_flat = pred_latent_sel[indices_mask]  # [M,C,h,w]
+                gt_flat = cond_hd_latents[indices_mask]  # [M,C,h,w]
+                L_rec = F.mse_loss(pred_flat, gt_flat, reduction='mean')
+            else:
+                L_rec = graph_zero
+
+        else:  
+            # 8) Decode to pixel space 
+            # Use checkpoint to decode with gradients but lower memory
+            gen_video = checkpoint(self.decode_fn, pred_original, decode_chunk_size=2, use_reentrant=False)
+            # print(f'gen_video shape: {gen_video.shape}')
+
+
+            # 9) 像素监督 rec loss（有 HD 才算）
+            video_ind_over_T = sparse_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(B, self.N, C_video, H_video, W_video)
+            gen_hd_video_sel = gen_video.gather(1, video_ind_over_T) # [B, N, C, H, W]
             
-        else:
-            L_fid = graph_zero
-            # L_perc = torch.tensor(0.0, device=self.device, dtype=self.data_type)  
+            if indices_mask.any().item():
+                # 为数值稳定，可以用 float32 算 loss，再把标量转回 self.data_type
+                gen_hd_video_flat = gen_hd_video_sel[indices_mask]  # [M, C, H_video, W_video]
+                gt_hd_video_flat  = hd_frames[indices_mask]    # [M, C, H_video, W_video]
+                L_rec = F.mse_loss(gen_hd_video_flat.to(self.data_type), gt_hd_video_flat.to(self.data_type), reduction='mean')
+                # Perceptual loss (average over frames)
+                # M = gen_hd_video_flat.shape[0]
+            
+                # L_perc = self.lpips(gen_hd_video_flat, gt_hd_video_flat).to(self.data_type)
+                # L_perc /= M            
+                
+            else:
+                L_rec = graph_zero
+                # L_perc = torch.tensor(0.0, device=self.device, dtype=self.data_type)  
 
 
-        # 10) HD temporal  loss
-        ## 归一化到 [0,1]，先不展平，保留 [B, N, C, H, W]，后面按 video 切片
-        gen_hd_sel_norm = (gen_hd_video_sel.clamp(-1, 1) + 1) / 2
-        gt_hd_norm  = (hd_frames.clamp(-1, 1) + 1) / 2
-
-        # 转到更稳定的 dtype 做 loss
-        gen_hd_sel_norm = gen_hd_sel_norm.to(self.data_type)
-        gt_hd_norm  = gt_hd_norm.to(self.data_type)
-
-        L_hd_temp = graph_zero
-        vid_count = 0
-
-        for b in range(gen_hd_sel_norm.shape[0]):  # 遍历每个 video
-            valid_idx = indices_mask[b].nonzero(as_tuple=True)[0]  # 该 video 内有效的 slot 索引
-            if valid_idx.numel() < 2:
-                continue  # 少于两帧，跳过时序损失
-
-            # 取出该 video 的有效帧序列，shape: [K, C, H, W]，K>=2
-            pred_seq = gen_hd_sel_norm[b, valid_idx, ...]  # [K, C, H, W]
-            gt_seq   = gt_hd_norm[b,  valid_idx, ...]  # [K, C, H, W]
-
-            # 给 compute_temporal_loss 一个 batch 维度：[1, K, C, H, W]
-            pred_seq = pred_seq.unsqueeze(0)
-            gt_seq   = gt_seq.unsqueeze(0)
-
-            # 累加该 video 的时序损失（标量）
-            L_hd_temp = L_hd_temp + self.compute_temporal_loss(pred_seq, gt_seq, step = 1, scale = 0.5)
-            vid_count += 1
-
-        # 对参与的 video 取平均；若没有任何 video 满足条件，则置 0
-        if vid_count > 0:
-            L_hd_temp = L_hd_temp / vid_count
-        else:
-            L_hd_temp = graph_zero
-        
-
-        # 11) LR temporal（fp32）
-        lr_norm = (lr_frames.clamp(-1, 1) + 1) / 2
-        gen_norm = (gen_video.clamp(-1, 1) + 1) / 2        
-        L_lr_temp = self.compute_temporal_loss(gen_norm, lr_norm, step = 2, scale = 0.5)
+            # 10) 光流loss（fp32）
+            lr_norm = (lr_frames.clamp(-1, 1) + 1) / 2
+            gen_norm = (gen_video.clamp(-1, 1) + 1) / 2        
+            L_temp = compute_temporal_loss(gen_norm, lr_norm, step = 2, scale = 0.5)
 
 
         # print('type of L_denoise:', L_denoise.dtype)
@@ -631,10 +581,10 @@ class FewShotVideoSRTrainer:
         # print('type of L_lr_temp:', L_lr_temp.dtype)
         # print('type of L_hd_temp:', L_hd_temp.dtype)
 
-        # 12)  Total loss
-        loss = L_denoise + 0.5 * L_fid + 0.5 * L_perc + 0.2 * L_lr_temp + 0.1 * L_hd_temp
+        # 11)  Total loss
+        loss = L_denoise + 0.5 * L_rec + 0.01 * L_temp 
         # loss = loss.to(self.data_type)  # Ensure same dtype as UNet
-        print(f"Loss: L_denoise={L_denoise.item():.4f}, L_fid={L_fid.item():.4f}, L_lr_temp={L_lr_temp.item():.4f}, L_hd_temp={L_hd_temp.item():.4f}")
+        print(f"Loss: L_denoise={L_denoise.item():.4f}, L_rec={L_rec.item():.4f}, L_temp={L_temp.item():.4f}")
         return loss
 
     def train(self, dataset, epochs=100, debug = False, grad_accum=1):

@@ -23,3 +23,14 @@
 测试（展示优势）：额外跑 N=1/2
 
 image_embeddings 构造：N=0 时完全用 LR embedding，N>0 时稀疏位用 HD embedding + mask
+
+
+
+
+补充两个问题
+
+1 应该直接用hd latent 替换对应槽位的lr latent
+
+2 noise 只统计hd frame 或者 统计所有frame但是加大HD 权重比率(自适应 或者 解析解设权重比) . k=0 的 batch（没有 HD）：建议把 denoise 权重几乎关掉（或较小）
+
+3 算 latent-warp flow loss 时，不管某些槽位 latent 是 HD 还是 LR，teacher 光流都统一用同一套 LR 像素序列

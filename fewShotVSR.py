@@ -511,10 +511,10 @@ class FewShotVideoSRTrainer:
         w = w * T #让每样本权重和恒为 T，数值更稳
         max_w = 8.0  # 避免个别样本权重过大
         w = w.clamp(max=max_w)
-        w = w.view(B, T, 1, 1, 1).to(torch.float32)
+        w = w.view(B, T, 1, 1, 1).to(self.data_type)
 
         ## 计算全帧加权 MSE（ fp32 计算）
-        diff = (vel_pred.to(torch.float32) - vel_gt.to(torch.float32)) ** 2  # [B,T,C,H,W]
+        diff = (vel_pred.to(self.data_type) - vel_gt.to(self.data_type)) ** 2  # [B,T,C,H,W]
         L_denoise = (diff * w).mean().to(self.data_type)
 
 
@@ -539,7 +539,7 @@ class FewShotVideoSRTrainer:
                 pred_latent_sel = pred_original.gather(1, latent_ind_over_T) # [B,N,C_lat,hz,wz]
                 pred_flat = pred_latent_sel[indices_mask]  # [M,C,h,w]
                 gt_flat = cond_hd_latents[indices_mask]  # [M,C,h,w]
-                L_rec = F.mse_loss(pred_flat, gt_flat, reduction='mean')
+                L_rec = F.mse_loss(pred_flat, gt_flat.to(self.data_type), reduction='mean')
             else:
                 L_rec = graph_zero
 

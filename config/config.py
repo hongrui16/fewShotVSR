@@ -39,7 +39,8 @@ class Config:
 
     # training Config        
     resume_path = None # path to the resume weight, if None, do not resume training.
-    finetune = True
+    resume_path = '/home/rhong5/research_pro/hand_modeling_pro/fsv/fewShotVSR/zlog/DummyDataset/2025-09-08-10-56-12-513223_4305312/best_checkpoint.pt'
+    finetune = False
     
     
     

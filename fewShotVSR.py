@@ -421,6 +421,8 @@ class FewShotVideoSRWorker:
                 "g_mlp": base.g_mlp.state_dict(),
                 "pos_abs": base.pos_abs.state_dict(),
                 "src_type": base.src_type.state_dict(),
+                "cond_pre_ln": base.cond_pre_ln.state_dict(),
+                "cond_adapter": base.cond_adapter.state_dict(),
                 "epoch": epoch,
                 "optimizer": self.optimizer.state_dict(),
                 'scheduler': self.scheduler.state_dict()
@@ -448,7 +450,7 @@ class FewShotVideoSRWorker:
 
         # 1) LoRA 或整网
         if "unet_lora" in state and state["unet_lora"] is not None:
-            set_peft_model_state_dict(unet_base, state["unet_lora"], strict=False)
+            set_peft_model_state_dict(unet_base, state["unet_lora"])
         elif "unet" in state:
             missing, unexpected = unet_base.load_state_dict(state["unet"], strict=False)
             if self.accelerator.is_main_process:
@@ -458,6 +460,8 @@ class FewShotVideoSRWorker:
         base.g_mlp.load_state_dict(state.get("g_mlp", {}), strict=False)
         base.pos_abs.load_state_dict(state.get("pos_abs", {}), strict=False)
         base.src_type.load_state_dict(state.get("src_type", {}), strict=False)
+        base.cond_pre_ln.load_state_dict(state.get("cond_pre_ln", {}), strict=False)
+        base.cond_adapter.load_state_dict(state.get("cond_adapter", {}), strict=False)
 
         if self.mode == 'train' and not self.finetune:
             if "optimizer" in state:

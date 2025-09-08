@@ -67,7 +67,7 @@ def _resize_pair(x, size_hw):
 def latent_warp_flow_loss(
     raft_model,
     pred_x0_latents_f32: torch.Tensor,  # [B, T, C_lat, h_z, w_z]  (来自 v->x0 的 fp32 latent)
-    frames_pixels: torch.Tensor,            # [B, T, 3, H, W]          (LR 或 HR 帧，范围[-1,1] 或 [0,1])
+    frames_pixels: torch.Tensor,            # [B, T, 3, H, W]          (LR 或 HR 帧， [0,1])
     step: int = 2,                      # 时间子采样：隔帧可显著省算力/显存
     raft_scale: float = 1.0             # 在缩小分辨率上跑 RAFT（如 0.5 或 0.25），会自动做位移缩放修正
 ) -> torch.Tensor:
@@ -85,7 +85,7 @@ def latent_warp_flow_loss(
 
     # 0) 规范化到 [0,1] 给 RAFT 用
     #    注意：不建图 —— 只当 teacher
-    imgs = (frames_pixels.float().clamp(-1, 1) + 1.0) / 2.0  # [B,T,3,H,W]
+    imgs = frames_pixels.float()
     _, _, _, H, W = imgs.shape
 
     # 1) 预先构建 latent 基础网格（对齐 grid_sample 的 align_corners=True）
@@ -100,26 +100,25 @@ def latent_warp_flow_loss(
     pairs = 0
 
     # 2) 逐对时间步计算（省显存）
-    for t in range(0, T - 1, step):
+    for t in range(0, T - step, step):
         # 2.1) 取相邻帧；可选：先下采样到更小分辨率跑 RAFT
         with torch.no_grad():
             if raft_scale != 1.0:
-                Hs = max(1, int(H * raft_scale))
-                Ws = max(1, int(W * raft_scale))
-                f1 = _resize_pair(imgs[:, t],   (Hs, Ws))  # [B,3,Hs,Ws]
-                f2 = _resize_pair(imgs[:, t+1], (Hs, Ws))
-                flow = raft_model(f1, f2)[-1]                    # [B,2,Hs,Ws] 单位=小图像素
-                # 直接插值到 latent 尺度
-                flow = F.interpolate(flow, size=(h_z, w_z), mode="bilinear", align_corners=False)  # [B,2,h_z,w_z]
-                # 将“小图像素位移”换算成“latent 像素位移”
-                # 1个小图像素 在 x 方向 ≈ wz/Ws 个 latent 像素；y 方向 ≈ hz/Hs
+                Hs = max(8, int(H * raft_scale)); Hs -= (Hs % 8)
+                Ws = max(8, int(W * raft_scale)); Ws -= (Ws % 8)
+                f1 = F.interpolate(imgs[:, t],       size=(Hs, Ws), mode="bilinear", align_corners=False)
+                f2 = F.interpolate(imgs[:, t + step], size=(Hs, Ws), mode="bilinear", align_corners=False)
+                flow = raft_model(f1, f2)[-1]  # [B,2,Hs,Ws] in small-pixel units
+                # 到 latent 分辨率（几何对齐建议 True）
+                flow = F.interpolate(flow, size=(h_z, w_z), mode="bilinear", align_corners=True)
+                # 像素单位换算：小图像素 -> latent 像素
                 flow[:, 0] *= (w_z / float(Ws))
                 flow[:, 1] *= (h_z / float(Hs))
             else:
                 f1 = imgs[:, t]   # [B,3,H,W]
-                f2 = imgs[:, t+1]
+                f2 = imgs[:, t+step]
                 flow = raft_model(f1, f2)[-1]                                  # [B,2,H,W] 单位=原图像素
-                flow = F.interpolate(flow, size=(h_z, w_z), mode="bilinear", align_corners=False)
+                flow = F.interpolate(flow, size=(h_z, w_z), mode="bilinear", align_corners=True)
                 # 原图像素 → latent 像素：x 乘 wz/W，y 乘 hz/H
                 flow[:, 0] *= (w_z / float(W))
                 flow[:, 1] *= (h_z / float(H))
@@ -139,7 +138,7 @@ def latent_warp_flow_loss(
 
         # 2.3) warp 第 t 帧的 latent（★可导），对齐到 t+1
         z_t   = pred_x0_latents_f32[:, t]     # [B,C_lat,h_z,w_z]
-        z_t1  = pred_x0_latents_f32[:, t+1]
+        z_t1  = pred_x0_latents_f32[:, t+step]  # [B,C_lat,h_z,w_z]
         z_t_w = F.grid_sample(
             z_t, grid, mode="bilinear", padding_mode="border", align_corners=True
         )  # [B,C_lat,h_z,w_z]

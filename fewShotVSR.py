@@ -45,9 +45,9 @@ from config.config import cfg
 from config.config import parse_args
 
 # from dataloader.dataset.dummy_dataset import DummyFewShotDataset
-from loss_func import compute_temporal_loss, latent_warp_flow_loss
 from dataloader.build_dataloader import build_dataloader
 from utils.vis import visualize_loss
+from utils.loss_func import compute_temporal_loss, latent_warp_flow_loss
 
 class SVDForSR(StableVideoDiffusionPipeline):
     def __call__(
@@ -74,6 +74,16 @@ class SRModulesUnfrozen(nn.Module):
         self.g_mlp = g_mlp
         self.pos_abs = pos_abs
         self.src_type = src_type
+        
+        D = unet.config.cross_attention_dim
+        self.cond_pre_ln  = nn.LayerNorm(D, eps=1e-6)
+        self.cond_adapter = nn.Sequential(
+            nn.Linear(D, 2*D), nn.GELU(), nn.Linear(2*D, D)
+        )
+        # 残差零初始化：起步“无影响”
+        nn.init.zeros_(self.cond_adapter[-1].weight)
+        nn.init.zeros_(self.cond_adapter[-1].bias)
+        
 
 
 class FewShotVideoSRWorker:
@@ -216,6 +226,7 @@ class FewShotVideoSRWorker:
         self.unet_cross_attention_dim = self.pipe.unet.config.cross_attention_dim
         self.logger.info(f'self.unet_cross_attention_dim: {self.unet_cross_attention_dim}', main_process_only=self.accelerator.is_main_process)
         
+        
         self.g_mlp = nn.Sequential(
             nn.Linear(3 * self.unet_cross_attention_dim, 128),
             nn.ReLU(),
@@ -228,10 +239,16 @@ class FewShotVideoSRWorker:
         self.logger.info(f'src_type: {self.src_type.weight.shape}', main_process_only=self.accelerator.is_main_process)
 
         # ===== Apply LoRA to UNet (trainable adapters; base UNet weights frozen by PEFT) =====
+        # 最小增强版：
+        attn_keys = ["to_q","to_k","to_v","to_out.0"]
+        ffn_keys  = ["ff.net.0.proj","ff.net.2"]         # 视模型实际命名微调
+        time_keys = ["time_embedding.linear_1","time_embedding.linear_2"]
+        targets = attn_keys + ffn_keys + time_keys
+
         lora_cfg = LoraConfig(
-            r=8,
+            r=16,
             lora_alpha=4,
-            target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+            target_modules=targets,
             lora_dropout=0.1,
             )
         self.pipe.unet = get_peft_model(self.pipe.unet, lora_cfg)
@@ -345,6 +362,9 @@ class FewShotVideoSRWorker:
         self.g_mlp     = self.unfrozenModules.g_mlp
         self.pos_abs   = self.unfrozenModules.pos_abs
         self.src_type  = self.unfrozenModules.src_type
+        self.cond_pre_ln  = self.unfrozenModules.cond_pre_ln
+        self.cond_adapter = self.unfrozenModules.cond_adapter
+
 
         # sanity check
         assert id(self.pipe.unet) == id(self.unfrozenModules.unet)
@@ -630,7 +650,7 @@ class FewShotVideoSRWorker:
             hd_frames is not None and
             indices_mask is not None and
             indices_mask.numel() > 0 and
-            indices_mask.to(torch.bool).any().item()
+            bool(indices_mask.to(torch.bool).any())   
         )
         if not has_hd:
             # 位置/来源嵌入 & dtype 统一
@@ -660,12 +680,9 @@ class FewShotVideoSRWorker:
         hd_sel = hd_token[b_idx, s_idx, :]              # [M, D], 一个batch中, 所有被选中的hd frame 的特征
 
         # 6) 门控融合（标量门；需要向量门时可替换）
-        if self.use_adaptive_gate:
-            feat = torch.cat([lr_sel, hd_sel, (hd_sel - lr_sel).abs()], dim=-1)  # [M, 3D]
-            # print('Adaptive gate features:', feat.shape)
-            g = torch.sigmoid(self.g_mlp(feat))                                  # [M,1] 或 [M,D]
-        else:
-            g = torch.sigmoid(self.hd_gate).view(1, 1).expand(hd_sel.size(0), 1) # [M,1]
+        feat = torch.cat([lr_sel, hd_sel, (hd_sel - lr_sel).abs()], dim=-1)  # [M, 3D]
+        # print('Adaptive gate features:', feat.shape)
+        g = torch.sigmoid(self.g_mlp(feat))                                  # [M,1] 或 [M,D]
 
         g = g.to(base_dtype)
         fused_sel = g * hd_sel + (1.0 - g) * lr_sel                               # [M, D]
@@ -733,6 +750,10 @@ class FewShotVideoSRWorker:
 
         src_ids = (attn_mask > 0).long()
         tokens = tokens + self.src_type(src_ids)
+        
+        tokens_f32 = self.cond_pre_ln(tokens.float())           # LN 用 fp32 更稳
+        tokens     = tokens + self.cond_adapter(tokens_f32)     # 残差注入
+
 
         tokens = tokens.to(self.pipe.unet.dtype)
 
@@ -825,7 +846,7 @@ class FewShotVideoSRWorker:
         
 
         # 6) compute x0 from predicted velocity
-        alpha_bar = self.noise_scheduler.alphas_cumprod[t].to(dtype=torch.float32)  # [B]   # [B]      float32       
+        alpha_bar = self.noise_scheduler.alphas_cumprod[t].to(device=self.device, dtype=torch.float32)  # [B]   # [B]      float32       
         ## 扩成 [B,1,1,1,1] 便于广播到 [B,T,C,h,w]
         sqrt_ab  = alpha_bar.view(B, 1, 1, 1, 1).sqrt()
         sqrt_oma = (1.0 - alpha_bar).view(B, 1, 1, 1, 1).sqrt()
@@ -882,23 +903,23 @@ class FewShotVideoSRWorker:
 
 
 
-        if self.use_latent_warp:
-            # 8) Decode to pixel space
-            with torch.no_grad():            
-                gen_video = self.decode_fn(pred_original, decode_chunk_size = 14)  # 默认decode_chunk_size=14, [B, C_video, T, H_video, W_video]
+        if self.use_latent_warp: ## to save memory, do not compute warp loss when not using it
+            # 8) Decode to pixel space, no need to decode when using latent warp
+            # with torch.no_grad():            
+            #     gen_video = self.decode_fn(pred_original, decode_chunk_size = 14)  # 默认decode_chunk_size=14, [B, T, C_video, H_video, W_video]
 
             pred_original = pred_original.to(self.data_type)
             # 9) 计算光流损失
             L_temp = latent_warp_flow_loss(
             raft_model         = self.raft,
             pred_x0_latents_f32 = pred_original,   # [B,T,C_lat,hz,wz]
-            frames_pixels           = lr_frames,     # [B,T,3,H,W], 任意精度输入，这里内部会转 [0,1]
+            frames_pixels           = lr_frames,     # [B,T,3,H,W], expected value range is between [0, 1].
             step                = 1,
             raft_scale          = 0.5
             )
 
             # 10) 计算重建loss
-            if indices_mask.any().item():
+            if bool(indices_mask.any()):
                 pred_latent_sel = pred_original.gather(1, latent_ind_over_T) # [B,N,C_lat,hz,wz]
                 pred_flat = pred_latent_sel[indices_mask]  # [M,C,h,w]
                 gt_flat = cond_hd_latents[indices_mask]  # [M,C,h,w]
@@ -917,7 +938,7 @@ class FewShotVideoSRWorker:
             video_ind_over_T = sparse_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).expand(B, self.N, C_video, H_video, W_video)
             gen_hd_video_sel = gen_video.gather(1, video_ind_over_T) # [B, N, C, H, W]
             
-            if indices_mask.any().item():
+            if bool(indices_mask.any()):
                 # 为数值稳定，可以用 float32 算 loss，再把标量转回 self.data_type
                 gen_hd_video_flat = gen_hd_video_sel[indices_mask]  # [M, C, H_video, W_video]
                 gt_hd_video_flat  = hd_frames[indices_mask]    # [M, C, H_video, W_video]
@@ -934,9 +955,7 @@ class FewShotVideoSRWorker:
 
 
             # 10) 光流loss（fp32）
-            lr_norm = (lr_frames.clamp(-1, 1) + 1) / 2
-            gen_norm = (gen_video.clamp(-1, 1) + 1) / 2        
-            L_temp = compute_temporal_loss(gen_norm, lr_norm, step = 1, scale = 0.5)
+            L_temp = compute_temporal_loss(gen_video, lr_frames, step = 1, scale = 0.5)
 
 
         # print('type of L_denoise:', L_denoise.dtype)

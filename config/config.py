@@ -31,7 +31,7 @@ class Config:
     warmup_ratio = 0.1
 
 
-    use_latent_warp = True
+    use_latent_warp = False #True
     use_adaptive_gate = True
 
     network_name = 'fewShotVSR' # HandPoseNetV2, HandPoseNet

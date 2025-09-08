@@ -270,9 +270,6 @@ class FewShotVideoSRWorker:
         # LPIPS
         # self.lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg').eval()
 
-        # RAFT for temporal loss
-        self.raft = raft_small(pretrained=True)
-        self.logger.info("RAFT model loaded.", main_process_only=self.accelerator.is_main_process)
 
         # Gradient checkpointing before prepare
         if self.mode == "train":
@@ -377,11 +374,20 @@ class FewShotVideoSRWorker:
         
         self.pipe.image_encoder.eval().requires_grad_(False).to(self.device)
         self.logger.info('moving CLIP image encoder to device', main_process_only=self.accelerator.is_main_process)
-        
-        self.raft.eval()
-        self.logger.info('moving RAFT to device', main_process_only=self.accelerator.is_main_process)
-        for p in self.raft.parameters(): p.requires_grad = False
-        self.raft.to(self.device)
+
+
+        if not self.use_latent_warp:        
+            # RAFT for temporal loss
+            self.raft = raft_small(pretrained=True)
+            self.logger.info("RAFT model loaded.", main_process_only=self.accelerator.is_main_process)
+
+            self.raft.eval()
+            self.logger.info('moving RAFT to device', main_process_only=self.accelerator.is_main_process)
+            for p in self.raft.parameters(): p.requires_grad = False
+            self.raft.to(self.device)
+        else:
+            self.logger.info('Using latent warp loss, no RAFT needed.', main_process_only=self.accelerator.is_main_process)
+            self.raft = None
 
     
 
@@ -959,7 +965,7 @@ class FewShotVideoSRWorker:
 
 
             # 10) 光流loss（fp32）
-            L_temp = compute_temporal_loss(gen_video, lr_frames, step = 1, scale = 0.5)
+            L_temp = compute_temporal_loss(self.raft, gen_video, lr_frames, step = 1, scale = 0.5)
 
 
         # print('type of L_denoise:', L_denoise.dtype)

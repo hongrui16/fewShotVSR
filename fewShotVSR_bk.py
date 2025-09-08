@@ -19,7 +19,7 @@ import os
 
 from torch.amp import GradScaler, autocast
 
-from dataloader.dataset.dummyData import DummyData
+from dataloader.dataset.dummyGenerator import DummyData
 from loss_func import compute_temporal_loss, latent_warp_flow_loss
 
 class FewShotVideoSRTrainer:

@@ -80,10 +80,13 @@ def latent_warp_flow_loss(
     if T < 2:
         return pred_x0_latents_f32.sum() * 0.0  # graph zero
 
+    # print(f'frames_pixels: {frames_pixels.shape}') # torch.Size([B, 14, 3, 256, 256])
+    # print(f'pred_x0_latents_f32: {pred_x0_latents_f32.shape}') #torch.Size([B, 14, 4, 32, 32])
+
     # 0) 规范化到 [0,1] 给 RAFT 用
     #    注意：不建图 —— 只当 teacher
     imgs = (frames_pixels.float().clamp(-1, 1) + 1.0) / 2.0  # [B,T,3,H,W]
-    _, _, H, W = imgs.shape
+    _, _, _, H, W = imgs.shape
 
     # 1) 预先构建 latent 基础网格（对齐 grid_sample 的 align_corners=True）
     yy, xx = torch.meshgrid(
@@ -126,9 +129,13 @@ def latent_warp_flow_loss(
         # w_z/h_z 可能为1，做个保护
         wx = max(w_z - 1, 1)
         hy = max(h_z - 1, 1)
-        dx_norm = (2.0 * flow[:, 0]) / float(wx)  # [B,h_z,w_z]
+        dx_norm = (2.0 * flow[:, 0]) / float(wx)  # [B,h_z,w_z], h_z and w_z are 32
         dy_norm = (2.0 * flow[:, 1]) / float(hy)  # [B,h_z,w_z]
-        grid = (base_grid + torch.stack([dx_norm, dy_norm], dim=-1).permute(0, 2, 3, 1)).clamp(-1, 1)  # [B,h_z,w_z,2]
+        # print(f'dx_norm: {dx_norm.shape}, dy_norm: {dy_norm.shape}') # torch.Size([B, 32, 32])
+        # print(f'base_grid: {base_grid.shape}') # torch.Size([1, 32, 32, B])
+        dxy_norm = torch.stack([dx_norm, dy_norm], dim=-1)
+        # print(f'dxy_norm: {dxy_norm.shape}') # torch.Size([B, 32, 32, 2])
+        grid = (base_grid + dxy_norm).clamp(-1, 1)  # [B,h_z,w_z,2]
 
         # 2.3) warp 第 t 帧的 latent（★可导），对齐到 t+1
         z_t   = pred_x0_latents_f32[:, t]     # [B,C_lat,h_z,w_z]

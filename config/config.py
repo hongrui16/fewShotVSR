@@ -14,10 +14,10 @@ import argparse
 class Config:
     
         
-    train_batch_size = 200
+    train_batch_size = 20
 
     ### dataset config
-    dataset_name = 'InterHand26M' # InterHand26M, InterHand26M_SHMulMod
+    dataset_name = 'DummyDataset' # InterHand26M, InterHand26M_SHMulMod
     
     
     test_batch_size = train_batch_size # 50 for 80g gpu
@@ -26,7 +26,7 @@ class Config:
 
     
     ### training config
-    num_train_epochs = 150
+    num_train_epochs = 60
     dump_samples = False
     warmup_ratio = 0.1
 
@@ -37,10 +37,9 @@ class Config:
     network_name = 'fewShotVSR' # HandPoseNetV2, HandPoseNet
 
 
-    # training Config
-    finetune = True    
+    # training Config        
     resume_path = None # path to the resume weight, if None, do not resume training.
-
+    finetune = True
     
     
     

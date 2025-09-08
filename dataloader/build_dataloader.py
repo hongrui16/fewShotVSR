@@ -7,8 +7,9 @@ import torchvision.transforms as transforms
 if __name__ == "__main__":
     sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from dataloader.dataset.dummy_dataset import DummyDataset
-
+from dataloader.dataset.dummyDataset import DummyDataset
+from dataloader.dataset.REDS import REDS25WindowDataset
+from dataloader.dataset.Vimeo90K import Vimeo7to14Dataset
 
 
 
@@ -24,8 +25,11 @@ def build_dataloader(
 
     dataset_name = kwargs.get('dataset_name', None)
     if dataset_name == 'DummyDataset':
-
         dataset = DummyDataset()
+    elif dataset_name == 'REDS':
+        pass
+    elif dataset_name == 'Vimeo-90K':
+        pass
     else:
         raise ValueError(f"Unknown dataset name: {dataset_name}")
 

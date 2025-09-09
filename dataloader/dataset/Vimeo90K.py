@@ -140,7 +140,7 @@ class Vimeo7to14Dataset(Dataset):
             return imgs
 
         ch, cw = self.crop_size_hr
-        imgs = [_pad_to_min_size_edge(img, ch, cw) for img in imgs]
+        # imgs = [_pad_to_min_size_edge(img, ch, cw) for img in imgs]
         H, W = imgs[0].shape[:2]
 
         if self.split == "train":
@@ -150,7 +150,8 @@ class Vimeo7to14Dataset(Dataset):
             if random.random() < 0.5:
                 imgs = [img[:, ::-1, :].copy() for img in imgs]
         else:
-            imgs = [_center_crop_np(img, ch, cw).copy() for img in imgs]
+            # imgs = [_center_crop_np(img, ch, cw).copy() for img in imgs]
+            pass  # keep original size (256x448)
         return imgs
 
 
@@ -190,20 +191,23 @@ class Vimeo7to14Dataset(Dataset):
 
 
 if __name__ == "__main__":
-    sequences_root = "/data/vimeo_septuplet/sequences"
-    train_txt = "/data/vimeo_septuplet/sep_trainlist.txt"   # 或你的 trainlist.txt
-    test_txt  = "/data/vimeo_septuplet/sep_testlist.txt"    # 或你的 testlist.txt
+    sequences_root = "/scratch/rhong5/dataset/Vimeo90K/vimeo_septuplet/sequences"
+    train_txt = "/scratch/rhong5/dataset/Vimeo90K/vimeo_septuplet/sep_trainlist.txt"   # 或你的 trainlist.txt
+    test_txt  = '/scratch/rhong5/dataset/Vimeo90K/vimeo_septuplet/sep_testlist.txt'    # 或你的 testlist.txt
 
     train_set = Vimeo7to14Dataset(
         sequences_root, split="train", split_txt=train_txt,
-        scale=4, crop_size_hr=None,  # 保持 256x448，不裁剪
+        scale=4, crop_size_hr=(256, 256),  # 保持 256x256
     )
 
     test_set = Vimeo7to14Dataset(
         sequences_root, split="test", split_txt=test_txt,
-        scale=4, crop_size_hr=None,
+        scale=4, crop_size_hr=None, # 保持 256x448
     )
 
 
     data = next(iter(DataLoader(train_set, batch_size=4, shuffle=True, num_workers=4, pin_memory=True)))
+    print([t.shape for t in data])
+    
+    data = next(iter(DataLoader(test_set, batch_size=4, shuffle=False, num_workers=4, pin_memory=True)))
     print([t.shape for t in data])

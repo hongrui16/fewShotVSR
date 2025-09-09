@@ -29,7 +29,7 @@ def build_dataloader(
     elif dataset_name == 'REDS':
         pass
     elif dataset_name == 'Vimeo-90K':
-        pass
+        dataset = Vimeo7to14Dataset(split=split, logger = logger)
     else:
         raise ValueError(f"Unknown dataset name: {dataset_name}")
 

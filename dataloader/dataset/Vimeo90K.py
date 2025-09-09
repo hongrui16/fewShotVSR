@@ -21,9 +21,13 @@ def build_vimeo90k_clips(sequences_root: str, split_txt: str) -> List[str]:
             if not key:
                 continue
             clip_dir = os.path.join(sequences_root, key)
+            
             # minimal existence check (im1.png)
-            if os.path.exists(os.path.join(clip_dir, "im1.png")):
-                clips.append(clip_dir)
+            # if os.path.exists(os.path.join(clip_dir, "im1.png")):
+            #     clips.append(clip_dir)
+            
+            clips.append(clip_dir)
+            
     if not clips:
         raise RuntimeError(f"No clips found. Check paths. sequences_root={sequences_root}, split_txt={split_txt}")
     return clips
@@ -82,9 +86,9 @@ class Vimeo7to14Dataset(Dataset):
 
     """
     def __init__(
-        self,
-        sequences_root: str,            # .../vimeo_septuplet/sequences
+        self,        
         split: str = "train",           # "train" | "val" | "test"
+        sequences_root: Optional[str] = None,            # .../vimeo_septuplet/sequences
         split_txt: Optional[str] = None,# e.g. .../sep_trainlist.txt
         scale: int = 4,
         crop_size_hr: Optional[Tuple[int,int]] = None,  # (H,W) or None. Keep None to preserve 256x448.
@@ -95,6 +99,21 @@ class Vimeo7to14Dataset(Dataset):
         **kwargs,
     ):
         self.split = split
+        
+        if sequences_root is None:
+            sequences_root = "/scratch/rhong5/dataset/Vimeo90K/vimeo_septuplet/sequences"
+            
+        if split_txt is None:
+            if split == "train":
+                split_txt = "/scratch/rhong5/dataset/Vimeo90K/vimeo_septuplet/sep_trainlist.txt"
+            elif split in ["val", "test"]:
+                split_txt = "/scratch/rhong5/dataset/Vimeo90K/vimeo_septuplet/sep_testlist.txt"
+            else:
+                raise ValueError(f"Unknown split {split}. Provide split_txt.")
+        
+        if split == 'train' and crop_size_hr is None:
+            crop_size_hr = (256, 256)  # default crop for train
+    
         self.scale = int(scale)
         self.to_neg1_pos1 = to_neg1_pos1
         self.crop_size_hr = crop_size_hr  # None -> keep native size (e.g., 256x448)
@@ -113,6 +132,11 @@ class Vimeo7to14Dataset(Dataset):
         if split_txt is None:
             raise ValueError("Please provide split_txt (e.g., trainlist.txt / testlist.txt).")
         self.clips = build_vimeo90k_clips(sequences_root, split_txt)
+        logger = kwargs.get("logger", None)
+        if logger is not None:
+            logger.info(f"Vimeo7to14Dataset {split}: {len(self.clips)} clips, scale={scale}, crop_size_hr={crop_size_hr}, to_neg1_pos1={to_neg1_pos1}, use_hd_noise={use_hd_noise}, hd_noise_std={hd_noise_std}, hd_probs={hd_probs}") 
+        else:
+            print(f"Vimeo7to14Dataset {split}: {len(self.clips)} clips, scale={scale}, crop_size_hr={crop_size_hr}, to_neg1_pos1={to_neg1_pos1}, use_hd_noise={use_hd_noise}, hd_noise_std={hd_noise_std}, hd_probs={hd_probs}")
 
 
     def __len__(self):

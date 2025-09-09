@@ -17,7 +17,7 @@ class Config:
     train_batch_size = 20
 
     ### dataset config
-    dataset_name = 'DummyDataset' # InterHand26M, InterHand26M_SHMulMod
+    dataset_name = 'Vimeo-90K' # InterHand26M, InterHand26M_SHMulMod
     
     
     test_batch_size = train_batch_size # 50 for 80g gpu
@@ -39,7 +39,6 @@ class Config:
 
     # training Config        
     resume_path = None # path to the resume weight, if None, do not resume training.
-    resume_path = '/home/rhong5/research_pro/hand_modeling_pro/fsv/fewShotVSR/zlog/DummyDataset/2025-09-08-10-56-12-513223_4305312/best_checkpoint.pt'
     finetune = False
     
     

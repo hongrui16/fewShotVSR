@@ -35,7 +35,9 @@ def build_vimeo90k_clips(sequences_root: str, split_txt: str) -> List[str]:
 def _to_tensor_and_norm(img_np: np.ndarray, to_neg1_pos1: bool=False) -> torch.Tensor:
     # img_np: HxWx3 uint8
     t = torch.from_numpy(img_np).permute(2,0,1).float() / 255.0
-    return (t * 2 - 1) if to_neg1_pos1 else t
+    if to_neg1_pos1:
+        t = t * 2 - 1
+    return t
 
 def _pil_bicubic_resize(img_np: np.ndarray, size_wh: Tuple[int,int]) -> np.ndarray:
     return np.array(Image.fromarray(img_np).resize(size_wh, Image.BICUBIC))
@@ -113,6 +115,11 @@ class Vimeo7to14Dataset(Dataset):
         
         if split == 'train' and crop_size_hr is None:
             crop_size_hr = (256, 256)  # default crop for train
+        
+        if split == "train":
+            self.height, self.width = crop_size_hr  # crop to square for train
+        else:
+            self.height, self.width = (256, 448)  # native Vimeo-90K size
     
         self.scale = int(scale)
         self.to_neg1_pos1 = to_neg1_pos1
@@ -193,23 +200,28 @@ class Vimeo7to14Dataset(Dataset):
         idx_map = IDX_7TO14.to(HR7.device)
         HR = HR7.index_select(dim=0, index=idx_map)        # [14,3,H,W]
 
+        # print('HR.min %.3f, max %.3f' % (HR.min().item(), HR.max().item()))
+        
         # 4) 由 HR 生成 LR：先下采样到 H//scale, W//scale，再上采样回 H,W
         H, W = HR.shape[-2:]
         h_lr, w_lr = H // self.scale, W // self.scale
         LR_down = F.interpolate(HR, size=(h_lr, w_lr), mode="bicubic", align_corners=False)
         LR      = F.interpolate(LR_down, size=(H, W),    mode="bicubic", align_corners=False)
+        
+        LR = torch.clamp(LR, 0.0, 1.0)
+
         # 现在 LR 与 HR 同分辨率（如 256x448），满足 SVD/UNet/VAE 的输入需求
 
         # 5) 从 LR 里取 HD 槽位帧（时间维 dim=0）
         idx2 = self.sparse_indices.to(LR.device)           # [0,6]
-        hd_frames = LR.index_select(dim=0, index=idx2)     # [2,3,H,W]
+        sparse_hd_frames = LR.index_select(dim=0, index=idx2)     # [2,3,H,W]
         if self.use_hd_noise:
-            hd_frames = (hd_frames + self.hd_noise_std * torch.randn_like(hd_frames)).clamp(-1, 1)
+            sparse_hd_frames = (sparse_hd_frames + self.hd_noise_std * torch.randn_like(sparse_hd_frames)).clamp(-1, 1)
 
         # 6) 槽位掩码
-        hd_mask = self._sample_hd_mask()                   # [2] bool
+        sparse_hd_mask = self._sample_hd_mask()                   # [2] bool
 
-        return LR, HR, hd_frames, hd_mask
+        return LR, HR, sparse_hd_frames, sparse_hd_mask
 
 
 
@@ -220,18 +232,20 @@ if __name__ == "__main__":
     test_txt  = '/scratch/rhong5/dataset/Vimeo90K/vimeo_septuplet/sep_testlist.txt'    # 或你的 testlist.txt
 
     train_set = Vimeo7to14Dataset(
-        sequences_root, split="train", split_txt=train_txt,
+        split="train", split_txt=train_txt,
         scale=4, crop_size_hr=(256, 256),  # 保持 256x256
     )
 
     test_set = Vimeo7to14Dataset(
-        sequences_root, split="test", split_txt=test_txt,
+        split="test", split_txt=test_txt,
         scale=4, crop_size_hr=None, # 保持 256x448
     )
 
 
-    data = next(iter(DataLoader(train_set, batch_size=4, shuffle=True, num_workers=4, pin_memory=True)))
-    print([t.shape for t in data])
+    LR, HR, sparse_hd_frames, sparse_hd_mask = next(iter(DataLoader(train_set, batch_size=4, shuffle=True, num_workers=4, pin_memory=True)))
+    print([t.shape for t in [LR, HR, sparse_hd_frames, sparse_hd_mask]])
+    print(sparse_hd_mask)
+    print('LR.min %.3f, max %.3f' % (LR.min().item(), LR.max().item()))
     
     data = next(iter(DataLoader(test_set, batch_size=4, shuffle=False, num_workers=4, pin_memory=True)))
     print([t.shape for t in data])

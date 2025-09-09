@@ -114,15 +114,16 @@ class FewShotVideoSRWorker:
         self.num_frames = 14  # For SVD, max frames is 14
         self.embed_dim = 768  # CLIP embed dimension
         
-        self.lamda_denoise = 1
+        self.lamda_denoise = 1.0
         self.lamda_rec = 0.3
-        self.lamda_tempor = 3
+        self.lamda_tempor = 8.0
         self.use_adaptive_gate = True
 
         self.use_latent_warp = cfg.use_latent_warp
         self.finetune = cfg.finetune
         self.resume_path = cfg.resume_path
         self.num_train_epochs = cfg.num_train_epochs
+        self.train_batch_size = cfg.train_batch_size
         
         
         self.mode = args.mode
@@ -201,7 +202,12 @@ class FewShotVideoSRWorker:
             torch_dtype=torch.float16
         )
 
-        
+        # Dtypes
+        self.unet_dtype = self.pipe.unet.dtype # fp16 under autocast
+        self.data_type = torch.float32 # compute loss in fp32 then cast back
+        self.amp_dtype = torch.float16 # strictly not bf16
+        self.logger.info(f"unet_dtype: {self.unet_dtype}, data_type: {self.data_type}, amp_dtype: {self.amp_dtype}", main_process_only=self.accelerator.is_main_process)
+
 
         # 推理用（pipe.scheduler）：DPM-Solver，确保 v_pred
         self.pipe.scheduler = DPMSolverMultistepScheduler.from_config(self.pipe.scheduler.config)
@@ -266,6 +272,14 @@ class FewShotVideoSRWorker:
             pos_abs=self.pos_abs,
             src_type=self.src_type
         )
+        
+        
+        self.pipe.unet = self.unfrozenModules.unet
+        self.g_mlp     = self.unfrozenModules.g_mlp
+        self.pos_abs   = self.unfrozenModules.pos_abs
+        self.src_type  = self.unfrozenModules.src_type
+        self.cond_pre_ln  = self.unfrozenModules.cond_pre_ln
+        self.cond_adapter = self.unfrozenModules.cond_adapter
 
         # LPIPS
         # self.lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg').eval()
@@ -301,7 +315,7 @@ class FewShotVideoSRWorker:
         if self.debug:
             batch_size = 2
         else:
-            batch_size = cfg.train_batch_size
+            batch_size = self.train_batch_size
         self.train_loader, self.train_dataset = build_dataloader(split='train', batch_size=batch_size, num_workers=4, logger=self.logger, device=self.device,
                                                                 dataset_name=cfg.dataset_name
                                                                  )
@@ -317,9 +331,10 @@ class FewShotVideoSRWorker:
         self.optimizer = None
         if self.mode == "train":
             trainable_params = []
-            for n, p in self.unfrozenModules.named_parameters():
-                if p.requires_grad:
-                    trainable_params.append(p)
+            for m in [self.pipe.unet, self.g_mlp, self.pos_abs, self.src_type, self.cond_pre_ln, self.cond_adapter]:
+                for p in m.parameters():
+                    if p.requires_grad:
+                        trainable_params.append(p)
 
             
             self.logger.info('initializing optimizer', main_process_only=self.accelerator.is_main_process)
@@ -331,40 +346,44 @@ class FewShotVideoSRWorker:
                                 weight_decay=cfg.optimizer_dict['weight_decay']      # 官方推荐 0.01
                             )
             
-            steps_per_epoch = math.ceil(len(self.train_loader) / gradient_accumulation_steps)
-            num_training_steps = steps_per_epoch * self.num_train_epochs
-            num_warmup_steps = int(num_training_steps * cfg.warmup_ratio)  # 建议 0.05~0.1
-
 
             # ===== Prepare with Accelerator =====
-            self.logger.info(f"Preparing for training: {self.num_train_epochs} epochs, {steps_per_epoch} steps/epoch, {num_training_steps} total steps ({num_warmup_steps} warmup)", main_process_only=self.accelerator.is_main_process)
-            
-            (self.unfrozenModules, self.optimizer, self.train_loader) = self.accelerator.prepare(
-                self.unfrozenModules, self.optimizer, self.train_loader
+        if self.mode == "train":
+            (self.pipe.unet, self.g_mlp, self.pos_abs, self.src_type,
+            self.cond_pre_ln, self.cond_adapter,
+            self.optimizer, self.train_loader) = self.accelerator.prepare(
+                self.pipe.unet, self.g_mlp, self.pos_abs, self.src_type,
+                self.cond_pre_ln, self.cond_adapter,
+                self.optimizer, self.train_loader
             )
+        else:
+            (self.pipe.unet, self.g_mlp, self.pos_abs, self.src_type,
+            self.cond_pre_ln, self.cond_adapter,
+            self.test_loader) = self.accelerator.prepare(
+                self.pipe.unet, self.g_mlp, self.pos_abs, self.src_type,
+                self.cond_pre_ln, self.cond_adapter,
+                self.test_loader
+            )
+
+        if self.mode == "train":
+            steps_per_epoch   = math.ceil(len(self.train_loader) / gradient_accumulation_steps)  # 这里的 len 是“每进程”的
+            num_training_steps= steps_per_epoch * self.num_train_epochs
+            num_warmup_steps  = int(num_training_steps * cfg.warmup_ratio)
+
+            self.logger.info(
+                f"Preparing for training: {self.num_train_epochs} epochs, "
+                f"{steps_per_epoch} steps/epoch, {num_training_steps} total steps "
+                f"({num_warmup_steps} warmup)",
+                main_process_only=self.accelerator.is_main_process
+            )
+
             self.logger.info('initializing lr scheduler', main_process_only=self.accelerator.is_main_process)
-            
             self.scheduler = get_cosine_schedule_with_warmup(
                 self.optimizer,
                 num_warmup_steps=num_warmup_steps,
                 num_training_steps=num_training_steps,
             )
-            
-        else:
-            (self.unfrozenModules, self.test_loader) = self.accelerator.prepare(
-                self.unfrozenModules, self.test_loader
-            )
 
-        self.pipe.unet = self.unfrozenModules.unet
-        self.g_mlp     = self.unfrozenModules.g_mlp
-        self.pos_abs   = self.unfrozenModules.pos_abs
-        self.src_type  = self.unfrozenModules.src_type
-        self.cond_pre_ln  = self.unfrozenModules.cond_pre_ln
-        self.cond_adapter = self.unfrozenModules.cond_adapter
-
-
-        # sanity check
-        assert id(self.pipe.unet) == id(self.unfrozenModules.unet)
 
         
         # Move non-prepared modules
@@ -376,108 +395,113 @@ class FewShotVideoSRWorker:
         self.logger.info('moving CLIP image encoder to device', main_process_only=self.accelerator.is_main_process)
 
 
-        if not self.use_latent_warp:        
-            # RAFT for temporal loss
-            self.raft = raft_small(pretrained=True)
-            self.logger.info("RAFT model loaded.", main_process_only=self.accelerator.is_main_process)
+        # RAFT for temporal loss
+        self.raft = raft_small(pretrained=True)
+        self.logger.info("RAFT model loaded.", main_process_only=self.accelerator.is_main_process)
 
-            self.raft.eval()
-            self.logger.info('moving RAFT to device', main_process_only=self.accelerator.is_main_process)
-            for p in self.raft.parameters(): p.requires_grad = False
-            self.raft.to(self.device)
-        else:
-            self.logger.info('Using latent warp loss, no RAFT needed.', main_process_only=self.accelerator.is_main_process)
-            self.raft = None
+        self.raft.eval()
+        self.logger.info('moving RAFT to device', main_process_only=self.accelerator.is_main_process)
+        for p in self.raft.parameters(): p.requires_grad = False
+        self.raft.to(self.device)
 
     
 
-        # Dtypes
-        self.param_type = self.pipe.unet.dtype # fp16 under autocast
-        self.data_type = torch.float32 # compute loss in fp32 then cast back
-        self.amp_dtype = torch.float16 # strictly not bf16
-        self.logger.info(f"param_type: {self.param_type}, data_type: {self.data_type}, amp_dtype: {self.amp_dtype}", main_process_only=self.accelerator.is_main_process)
-        
+
         self.start_epoch = 0
 
         self.logger.info("Initialization complete.\n", main_process_only=self.accelerator.is_main_process)
 
     def save_checkpoint(self, epoch, is_best_epoch=False):
-
-        fname = "checkpoint.pt"
-        if is_best_epoch:
-            fname = "best_checkpoint.pt"
+        fname = "best_checkpoint.pt" if is_best_epoch else "checkpoint.pt"
         path = os.path.join(self.output_ckpts_dir, fname)
-        
+
         if self.accelerator.is_main_process:
-            # unwrap 模型避免 accelerator 包装
-            base = self.accelerator.unwrap_model(self.unfrozenModules)
-            unet_base = base.unet
+            # 统一从“真实 forward 的模块”解包
+            unet_raw    = self.accelerator.unwrap_model(self.pipe.unet)
+            g_mlp_raw   = self.accelerator.unwrap_model(self.g_mlp)
+            pos_abs_raw = self.accelerator.unwrap_model(self.pos_abs)
+            src_type_raw= self.accelerator.unwrap_model(self.src_type)
+            pre_ln_raw  = self.accelerator.unwrap_model(self.cond_pre_ln)
+            adapter_raw = self.accelerator.unwrap_model(self.cond_adapter)
 
-            # 1) LoRA 或整网
-            if isinstance(unet_base, PeftModel) or hasattr(unet_base, "peft_config"):
-                unet_payload = {"unet_lora": get_peft_model_state_dict(unet_base)}
-                self.logger.info("Saving LoRA weights.", main_process_only=self.accelerator.is_main_process)
+            # 1) 保存 UNet：优先保存 LoRA，若不是 PeftModel 再保存整网
+            state = {}
+            if isinstance(unet_raw, PeftModel) or hasattr(unet_raw, "peft_config"):
+                state["unet_lora"] = get_peft_model_state_dict(unet_raw)
+                self.logger.info("Saving LoRA weights.", main_process_only=True)
             else:
-                unet_payload = {"unet": unet_base.state_dict()}
-                self.logger.info("Saving full UNet weights.", main_process_only=self.accelerator.is_main_process)
+                state["unet"] = unet_raw.state_dict()
+                self.logger.info("Saving full UNet weights.", main_process_only=True)
 
-            state = {
-                **unet_payload,
-                "unet_lora": get_peft_model_state_dict(base.unet),       # 只存 LoRA adapter
-                "g_mlp": base.g_mlp.state_dict(),
-                "pos_abs": base.pos_abs.state_dict(),
-                "src_type": base.src_type.state_dict(),
-                "cond_pre_ln": base.cond_pre_ln.state_dict(),
-                "cond_adapter": base.cond_adapter.state_dict(),
-                "epoch": epoch,
-                "optimizer": self.optimizer.state_dict(),
-                'scheduler': self.scheduler.state_dict()
-            }
-            
+            # 2) 保存自定义头/嵌入/适配层
+            state.update({
+                "g_mlp":        g_mlp_raw.state_dict(),
+                "pos_abs":      pos_abs_raw.state_dict(),
+                "src_type":     src_type_raw.state_dict(),
+                "cond_pre_ln":  pre_ln_raw.state_dict(),
+                "cond_adapter": adapter_raw.state_dict(),
+                "epoch":        epoch,
+            })
+
+            # 3) 训练场景下保存优化器与调度器
+            if self.mode == "train":
+                state["optimizer"] = self.optimizer.state_dict()
+                state["scheduler"] = self.scheduler.state_dict()
+
+            # 4) 只主进程写盘
             if os.path.exists(path):
                 os.remove(path)
             self.accelerator.save(state, path)
-            
+
         self.accelerator.wait_for_everyone()
         self.logger.info(f"Saved checkpoint to {path}", main_process_only=self.accelerator.is_main_process)
+
 
     def load_checkpoint(self):
         if self.resume_path is None or not os.path.isfile(self.resume_path):
             self.logger.warning(f"Resume path is invalid: {self.resume_path}", main_process_only=self.accelerator.is_main_process)
             return
 
-        # 只让主进程读取磁盘，其余进程等待
+        # 只让主进程读盘，其它进程等
         with self.accelerator.main_process_first():
             state = torch.load(self.resume_path, map_location="cpu")
 
+        # 解包真实模块
+        unet_raw    = self.accelerator.unwrap_model(self.pipe.unet)
+        g_mlp_raw   = self.accelerator.unwrap_model(self.g_mlp)
+        pos_abs_raw = self.accelerator.unwrap_model(self.pos_abs)
+        src_type_raw= self.accelerator.unwrap_model(self.src_type)
+        pre_ln_raw  = self.accelerator.unwrap_model(self.cond_pre_ln)
+        adapter_raw = self.accelerator.unwrap_model(self.cond_adapter)
 
-        base = self.accelerator.unwrap_model(self.unfrozenModules)
-        unet_base = base.unet
-
-        # 1) LoRA 或整网
+        # 1) 加载 UNet（LoRA 优先）
         if "unet_lora" in state and state["unet_lora"] is not None:
-            set_peft_model_state_dict(unet_base, state["unet_lora"])
+            set_peft_model_state_dict(unet_raw, state["unet_lora"])
+            if self.accelerator.is_main_process:
+                self.logger.info("Loaded LoRA weights into UNet.")
         elif "unet" in state:
-            missing, unexpected = unet_base.load_state_dict(state["unet"], strict=False)
+            missing, unexpected = unet_raw.load_state_dict(state["unet"], strict=False)
             if self.accelerator.is_main_process:
                 self.logger.warning(f"Loaded full UNet weights. Missing={len(missing)}, Unexpected={len(unexpected)}")
 
-        # 自定义模块
-        base.g_mlp.load_state_dict(state.get("g_mlp", {}), strict=False)
-        base.pos_abs.load_state_dict(state.get("pos_abs", {}), strict=False)
-        base.src_type.load_state_dict(state.get("src_type", {}), strict=False)
-        base.cond_pre_ln.load_state_dict(state.get("cond_pre_ln", {}), strict=False)
-        base.cond_adapter.load_state_dict(state.get("cond_adapter", {}), strict=False)
+        # 2) 自定义模块
+        g_mlp_raw.load_state_dict(state.get("g_mlp", {}), strict=False)
+        pos_abs_raw.load_state_dict(state.get("pos_abs", {}), strict=False)
+        src_type_raw.load_state_dict(state.get("src_type", {}), strict=False)
+        pre_ln_raw.load_state_dict(state.get("cond_pre_ln", {}), strict=False)
+        adapter_raw.load_state_dict(state.get("cond_adapter", {}), strict=False)
 
+        # 3) 训练态 & 非 finetune 时才恢复优化器/调度器/epoch
         if self.mode == 'train' and not self.finetune:
             if "optimizer" in state:
                 self.optimizer.load_state_dict(state["optimizer"])
             if "scheduler" in state:
-                self.scheduler.load_state_dict(state['scheduler'])
+                self.scheduler.load_state_dict(state["scheduler"])
             self.start_epoch = state.get("epoch", 0) + 1
 
         self.accelerator.wait_for_everyone()
         self.logger.info(f"Loaded checkpoint from {self.resume_path}", main_process_only=self.accelerator.is_main_process)
+
 
 
 
@@ -765,7 +789,7 @@ class FewShotVideoSRWorker:
         tokens     = tokens + self.cond_adapter(tokens_f32)     # 残差注入
 
 
-        tokens = tokens.to(self.pipe.unet.dtype)
+        tokens = tokens.to(self.unet_dtype)
 
         return tokens.contiguous(), attn_mask
 
@@ -891,7 +915,7 @@ class FewShotVideoSRWorker:
         k_lr = (T - k_hd).clamp(min=1)                    # [B]
         has_hd = (k_hd > 0)
 
-        alpha = 0.65
+        alpha = 0.5
 
         # per-frame MSE，先在 (C,H,W) 上均值，再按帧加权
         per_frame_mse = ((pred_v.float() - target_v.float())**2).mean(dim=(2,3,4))  # [B,T]
@@ -1010,14 +1034,15 @@ class FewShotVideoSRWorker:
         self.optimizer.zero_grad(set_to_none=True)
 
         for step, batch in enumerate(dataloader):
-            lr_frames, hd_frames, mask = batch
+            ## LR, HR, sparse_hd_frames, sparse_hd_mask
+            lr_frames, _, sparse_hd_frames, sparse_hd_mask = batch
             if step % step_interval == 0 or step == total_steps - 1:  # Update progress bar 50 times
                 progress_bar.update(step_interval)
                 
             with self.accelerator.accumulate(self.unfrozenModules):
                 # AMP 由 Accelerate 统一管理；VAE 内部需要 fp32 的地方你在 compute_loss 里局部 autocast(False) 即可
                 with self.accelerator.autocast():
-                    loss_sum, L_denoise, L_rec, L_temp = self.compute_loss(lr_frames, hd_frames, mask)  
+                    loss_sum, L_denoise, L_rec, L_temp = self.compute_loss(lr_frames, sparse_hd_frames, sparse_hd_mask)  
 
                 # 自动处理 GradScaler / DDP
                 self.accelerator.backward(loss_sum)
@@ -1043,10 +1068,10 @@ class FewShotVideoSRWorker:
             if epoch == 0 and step == 0: # in GB
                 allocated_memory_gb = torch.cuda.memory_allocated() / (1024**3)
                 reserved_memory_gb = torch.cuda.memory_reserved() / (1024**3)
-                self.logger.info(f'gpu memory allocated: {allocated_memory_gb:.2f} GB', main_process_only=self.accelerator.is_main_process)
-                self.logger.info(f'gpu memory reserved: {reserved_memory_gb:.2f} GB', main_process_only=self.accelerator.is_main_process)
-            
-            
+                self.logger.info(f'gpu memory allocated: {allocated_memory_gb:.2f} GB with batch size {self.train_batch_size}', main_process_only=self.accelerator.is_main_process)
+                self.logger.info(f'gpu memory reserved: {reserved_memory_gb:.2f} GB with batch size {self.train_batch_size}', main_process_only=self.accelerator.is_main_process)
+
+
             if self.debug and step >= 5:
                 break
 
@@ -1106,7 +1131,8 @@ class FewShotVideoSRWorker:
 
             self.save_checkpoint(epoch, is_best_epoch)
             
-            lr = self.optimizer.param_groups[0]['lr']
+            # lr = self.optimizer.param_groups[0]['lr']
+            lr = self.scheduler.get_last_lr()[0] if self.scheduler is not None else self.optimizer.param_groups[0]['lr']
             self.logger.info(f"Epoch {epoch:3d} done. sum_loss={sum_loss:.6f}, l_denoise={l_denoise:.6f}, l_rec={l_rec:.6f}, l_temp={l_temp:.6f}, best_loss={self.best_loss:.6f}, lr={lr:.6f}", main_process_only=self.accelerator.is_main_process)
             
             

@@ -14,7 +14,7 @@ import argparse
 class Config:
     
         
-    train_batch_size = 20
+    train_batch_size = 80
 
     ### dataset config
     dataset_name = 'Vimeo-90K' # InterHand26M, InterHand26M_SHMulMod
@@ -28,10 +28,10 @@ class Config:
     ### training config
     num_train_epochs = 60
     dump_samples = False
-    warmup_ratio = 0.1
+    
 
 
-    use_latent_warp = False #True
+    use_latent_warp = True #True
     use_adaptive_gate = True
 
     network_name = 'fewShotVSR' # HandPoseNetV2, HandPoseNet
@@ -39,12 +39,12 @@ class Config:
 
     # training Config        
     resume_path = None # path to the resume weight, if None, do not resume training.
-    finetune = False
+    finetune = True
     
     
     
     ## optimizer config
-    
+    warmup_ratio = 0.02
     optimizer_dict = {
         'name': 'adam', # 'adam' or 'SGD'
         'lr': 5*1e-4,
